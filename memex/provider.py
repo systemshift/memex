@@ -1,4 +1,4 @@
-"""Chat provider for TUI."""
+"""Chat provider for Memex."""
 
 import os
 import json

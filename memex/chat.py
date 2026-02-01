@@ -1,4 +1,4 @@
-"""Chat panel widget for Memex TUI."""
+"""Chat panel widget for Memex."""
 
 import json
 from typing import Callable, Awaitable

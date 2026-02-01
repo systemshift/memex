@@ -1,4 +1,4 @@
-"""Memex TUI Application."""
+"""Memex Application."""
 
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Footer, Header
@@ -9,7 +9,7 @@ from .chat import ChatPanel, ChatEngine
 
 
 class MemexApp(App):
-    """Interactive TUI for memex and dagit."""
+    """Interactive interface for memex-server and dagit."""
 
     CSS = """
     Screen {
@@ -70,7 +70,7 @@ class MemexApp(App):
         self.query_one("#input", Input).focus()
         chat = self.query_one("#chat-log", ChatPanel)
         chat.add_system_message(
-            "Welcome to Memex TUI. Ask questions about your knowledge graph or dagit network."
+            "Welcome to Memex. Ask questions about your knowledge graph or dagit network."
         )
         chat.add_system_message('Type "help" for commands, Ctrl+C to quit.')
 

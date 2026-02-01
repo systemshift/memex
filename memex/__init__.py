@@ -1,10 +1,10 @@
-"""Memex TUI - Interactive control plane for memex and dagit."""
+"""Memex - Control plane for memex-server and dagit."""
 
 from .app import MemexApp
 
 
 def main():
-    """Entry point for memex-tui command."""
+    """Entry point for memex command."""
     app = MemexApp()
     app.run()
 
