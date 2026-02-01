@@ -17,7 +17,7 @@ dagit = [
 ]
 
 [project.scripts]
-memex = "memex_tui:main"
+memex = "memex:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
