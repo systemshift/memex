@@ -1,4 +1,4 @@
-"""memex-stack - Launch memex server and TUI together."""
+"""memex-stack - One command to download, start, and launch everything."""
 
 import os
 import signal
@@ -22,37 +22,8 @@ def error(msg: str) -> None:
     print(f"\033[0;31m[memex]\033[0m {msg}", file=sys.stderr)
 
 
-def find_server() -> str | None:
-    """Find memex-server binary."""
-    # Check environment variable first
-    if server := os.environ.get("MEMEX_SERVER"):
-        return server
-
-    # Check common locations
-    locations = [
-        "memex-server",  # In PATH
-        "./memex-server",  # Current directory
-        str(Path.home() / ".local" / "bin" / "memex-server"),
-        "/usr/local/bin/memex-server",
-    ]
-
-    for loc in locations:
-        try:
-            result = subprocess.run(
-                [loc, "--help"],
-                capture_output=True,
-                timeout=5,
-            )
-            if result.returncode == 0 or b"memex" in result.stdout.lower():
-                return loc
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-
-    return None
-
-
-def wait_for_server(url: str, timeout: float = 5.0) -> bool:
-    """Wait for server to be ready."""
+def wait_for_server(url: str, timeout: float = 10.0) -> bool:
+    """Wait for memex-server to be ready."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -61,8 +32,21 @@ def wait_for_server(url: str, timeout: float = 5.0) -> bool:
                 return True
         except httpx.RequestError:
             pass
-        time.sleep(0.1)
+        time.sleep(0.2)
     return False
+
+
+def is_graph_empty(server_url: str) -> bool:
+    """Check if the knowledge graph has any nodes."""
+    try:
+        resp = httpx.get(f"{server_url}/api/nodes", params={"limit": 1}, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            nodes = data if isinstance(data, list) else data.get("nodes", [])
+            return len(nodes) == 0
+    except Exception:
+        pass
+    return True
 
 
 def main() -> int:
@@ -70,7 +54,7 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Launch memex server and TUI together"
+        description="Launch memex: downloads binaries, starts services, opens TUI"
     )
     parser.add_argument(
         "--server-only",
@@ -95,20 +79,103 @@ def main() -> int:
         default=os.environ.get("SQLITE_PATH", str(Path.home() / ".memex" / "memex.db")),
         help="SQLite database path",
     )
+    parser.add_argument(
+        "--skip-ipfs",
+        action="store_true",
+        help="Skip IPFS daemon setup",
+    )
+    parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Skip automatic binary downloads (use only local binaries)",
+    )
     args = parser.parse_args()
 
-    # Find server binary
-    server_bin = find_server()
-    if not server_bin:
-        error("memex-server not found")
-        error("Install from: https://github.com/systemshift/memex-server/releases")
+    # Track all subprocesses for cleanup
+    procs: list[subprocess.Popen] = []
+
+    def cleanup(signum=None, frame=None):
+        for proc in reversed(procs):
+            if proc.poll() is None:
+                log(f"Stopping process (PID {proc.pid})...")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+
+    # --- Step 1: Check OPENAI_API_KEY ---
+    if not os.environ.get("OPENAI_API_KEY"):
+        error("OPENAI_API_KEY environment variable is not set.")
+        error("Get your API key from: https://platform.openai.com/api-keys")
+        error("Then run: export OPENAI_API_KEY=sk-...")
         return 1
 
-    # Create data directory
+    # --- Step 2: Ensure memex-server binary ---
+    if args.skip_download:
+        import shutil
+        server_bin = os.environ.get("MEMEX_SERVER") or shutil.which("memex-server")
+        if not server_bin:
+            cached = Path.home() / ".memex" / "bin" / "memex-server"
+            if cached.is_file():
+                server_bin = str(cached)
+            else:
+                error("memex-server not found (--skip-download active)")
+                error("Install from: https://github.com/systemshift/memex-server/releases")
+                return 1
+    else:
+        from .binaries import ensure_memex_server
+        server_bin = ensure_memex_server()
+    log(f"memex-server: {server_bin}")
+
+    # --- Step 3: Ensure IPFS binary ---
+    ipfs_bin = None
+    if not args.skip_ipfs:
+        if args.skip_download:
+            import shutil
+            ipfs_bin = shutil.which("ipfs")
+            if not ipfs_bin:
+                cached = Path.home() / ".memex" / "bin" / "ipfs"
+                if cached.is_file():
+                    ipfs_bin = str(cached)
+                else:
+                    warn("IPFS not found (--skip-download active), skipping IPFS")
+        else:
+            from .binaries import ensure_ipfs
+            ipfs_bin = ensure_ipfs()
+            log(f"IPFS: {ipfs_bin}")
+
+    # --- Step 4: Ensure IPFS repo ---
+    if ipfs_bin and not args.skip_ipfs:
+        from .services import ensure_ipfs_repo
+        ensure_ipfs_repo(ipfs_bin)
+
+    # --- Step 5: Start IPFS daemon if needed ---
+    if ipfs_bin and not args.skip_ipfs:
+        from .services import is_ipfs_running, start_ipfs_daemon, wait_for_ipfs
+        if is_ipfs_running():
+            log("IPFS daemon already running")
+        else:
+            ipfs_proc = start_ipfs_daemon(ipfs_bin)
+            procs.append(ipfs_proc)
+            if wait_for_ipfs():
+                log("IPFS daemon ready")
+            else:
+                warn("IPFS daemon did not start in time, continuing without it")
+
+    # --- Step 6: Ensure dagit identity ---
+    from .services import ensure_dagit_identity
+    did = ensure_dagit_identity()
+    if did != "unknown":
+        log(f"Identity: {did}")
+
+    # --- Step 7: Start memex-server ---
     db_path = Path(args.db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Start server
     log(f"Starting memex-server on port {args.port} ({args.backend} backend)...")
 
     env = os.environ.copy()
@@ -122,26 +189,14 @@ def main() -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    procs.append(server_proc)
 
-    def cleanup(signum=None, frame=None):
-        if server_proc.poll() is None:
-            log(f"Stopping memex-server (PID {server_proc.pid})...")
-            server_proc.terminate()
-            try:
-                server_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                server_proc.kill()
-
-    signal.signal(signal.SIGINT, cleanup)
-    signal.signal(signal.SIGTERM, cleanup)
-
-    # Wait for server
+    # --- Step 8: Wait for server ---
     server_url = f"http://localhost:{args.port}"
     if not wait_for_server(server_url):
         error("Server failed to start")
         cleanup()
         return 1
-
     log("Server ready")
 
     if args.server_only:
@@ -154,18 +209,24 @@ def main() -> int:
             cleanup()
         return 0
 
-    # Set server URL for TUI
+    # Set server URL for tools module
     os.environ["MEMEX_URL"] = server_url
 
-    # Launch TUI
-    log("Launching memex TUI...")
+    # --- Step 9: Check if graph is empty ---
+    first_run = is_graph_empty(server_url)
+    if first_run:
+        log("Empty graph detected — starting onboarding")
+
+    # --- Step 10: Launch TUI ---
+    log("Launching memex...")
     try:
         from .app import MemexApp
-        app = MemexApp()
+        app = MemexApp(first_run=first_run)
         app.run()
     except KeyboardInterrupt:
         pass
     finally:
+        # --- Step 11: Cleanup ---
         cleanup()
 
     return 0

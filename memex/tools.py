@@ -8,7 +8,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MEMEX_URL = os.getenv("MEMEX_URL", "http://localhost:8080")
+
+def _get_memex_url() -> str:
+    """Get memex server URL at execution time, not import time."""
+    return os.getenv("MEMEX_URL", "http://localhost:8080")
 
 
 # --- Memex Tool Definitions ---
@@ -208,7 +211,7 @@ def _memex_search(args: dict) -> str:
     limit = args.get("limit", 10)
 
     resp = httpx.get(
-        f"{MEMEX_URL}/api/query/search",
+        f"{_get_memex_url()}/api/query/search",
         params={"q": query, "limit": limit},
         timeout=10,
     )
@@ -236,7 +239,7 @@ def _memex_search(args: dict) -> str:
 def _memex_get_node(args: dict) -> str:
     node_id = args.get("id", "")
 
-    resp = httpx.get(f"{MEMEX_URL}/api/nodes/{node_id}", timeout=10)
+    resp = httpx.get(f"{_get_memex_url()}/api/nodes/{node_id}", timeout=10)
 
     if resp.status_code != 200:
         return f"Node not found: {node_id}"
@@ -255,7 +258,7 @@ def _memex_get_node(args: dict) -> str:
 def _memex_get_links(args: dict) -> str:
     node_id = args.get("id", "")
 
-    resp = httpx.get(f"{MEMEX_URL}/api/nodes/{node_id}/links", timeout=10)
+    resp = httpx.get(f"{_get_memex_url()}/api/nodes/{node_id}/links", timeout=10)
 
     if resp.status_code != 200:
         return f"No links for: {node_id}"
@@ -296,7 +299,7 @@ def _memex_traverse(args: dict) -> str:
     depth = args.get("depth", 2)
 
     resp = httpx.get(
-        f"{MEMEX_URL}/api/query/traverse",
+        f"{_get_memex_url()}/api/query/traverse",
         params={"start": start, "depth": depth},
         timeout=10,
     )
@@ -330,7 +333,7 @@ def _memex_filter(args: dict) -> str:
     limit = args.get("limit", 20)
 
     resp = httpx.get(
-        f"{MEMEX_URL}/api/query/filter",
+        f"{_get_memex_url()}/api/query/filter",
         params={"type": ntype, "limit": limit},
         timeout=10,
     )
@@ -367,7 +370,7 @@ def _memex_create_node(args: dict) -> str:
         payload["meta"]["title"] = title
 
     resp = httpx.post(
-        f"{MEMEX_URL}/api/nodes",
+        f"{_get_memex_url()}/api/nodes",
         json=payload,
         timeout=10,
     )

@@ -51,9 +51,10 @@ class MemexApp(App):
 
     TITLE = "Memex"
 
-    def __init__(self):
+    def __init__(self, first_run: bool = False):
         super().__init__()
-        self.chat_engine = ChatEngine()
+        self.first_run = first_run
+        self.chat_engine = ChatEngine(first_run=first_run)
         self._current_response = ""
 
     def compose(self) -> ComposeResult:
@@ -69,10 +70,38 @@ class MemexApp(App):
         """Focus input on start."""
         self.query_one("#input", Input).focus()
         chat = self.query_one("#chat-log", ChatPanel)
-        chat.add_system_message(
-            "Welcome to Memex. Ask questions about your knowledge graph or dagit network."
-        )
-        chat.add_system_message('Type "help" for commands, Ctrl+C to quit.')
+
+        if self.first_run:
+            chat.add_system_message("Welcome to Memex — setting things up...")
+            self.run_worker(self._auto_greet())
+        else:
+            chat.add_system_message(
+                "Welcome to Memex. Ask questions about your knowledge graph or dagit network."
+            )
+            chat.add_system_message('Type "help" for commands, Ctrl+C to quit.')
+
+    async def _auto_greet(self) -> None:
+        """Send initial greeting on first run so the LLM speaks first."""
+        chat = self.query_one("#chat-log", ChatPanel)
+        chat.start_assistant_response()
+        self._current_response = ""
+
+        async def on_text(text: str) -> None:
+            self._current_response += text
+            chat.add_assistant_text(text)
+
+        async def on_tool(tool_name: str) -> None:
+            chat.add_tool_indicator(tool_name)
+
+        try:
+            await self.chat_engine.send(
+                "I just installed memex. Help me get started.", on_text, on_tool
+            )
+        except Exception as e:
+            chat.add_error(str(e))
+
+        if self._current_response and not self._current_response.endswith("\n"):
+            chat.write("")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input."""

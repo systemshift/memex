@@ -31,10 +31,11 @@ Be concise but helpful. Use the tools proactively when they would help answer th
 class ChatEngine:
     """Manages chat state and model interactions."""
 
-    def __init__(self):
+    def __init__(self, first_run: bool = False):
         self.provider = ChatProvider()
         self.messages: list[dict] = []
         self.tools = get_all_tools()
+        self.first_run = first_run
 
     async def send(
         self,
@@ -56,8 +57,11 @@ class ChatEngine:
             text_buffer = ""
             tool_calls: list[ToolCall] = []
 
+            from .onboarding import get_system_prompt
+            system_prompt = get_system_prompt(self.first_run)
+
             for chunk in self.provider.stream(
-                SYSTEM_PROMPT, self.messages, self.tools
+                system_prompt, self.messages, self.tools
             ):
                 if chunk.type == "text":
                     await on_text(chunk.text)

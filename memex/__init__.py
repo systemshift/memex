@@ -1,4 +1,6 @@
-"""Memex - Control plane for memex-server and dagit."""
+"""Memex - AI-native knowledge graph with decentralized social networking."""
+
+__version__ = "0.1.0"
 
 from .app import MemexApp
 
