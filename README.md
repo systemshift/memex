@@ -5,7 +5,7 @@ AI-native knowledge graph + decentralized social network.
 ## Install
 
 ```bash
-pip install memex
+pip install memex-graph
 memex-stack
 ```
 
