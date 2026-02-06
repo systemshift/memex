@@ -1,6 +1,6 @@
 [project]
 name = "memex-graph"
-version = "0.1.0"
+version = "0.1.1"
 description = "AI-native knowledge graph with decentralized social networking"
 requires-python = ">=3.10"
 dependencies = [

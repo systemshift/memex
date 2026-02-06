@@ -179,7 +179,7 @@ def ensure_memex_server() -> str:
         os_label = "Linux" if os_name == "linux" else "Darwin"
         arch_label = "x86_64" if arch == "amd64" else "arm64"
 
-        filename = f"memex_{os_label}_{arch_label}.tar.gz"
+        filename = f"memex-server_{os_label}_{arch_label}.tar.gz"
         url = f"https://github.com/{MEMEX_SERVER_REPO}/releases/download/{MEMEX_SERVER_VERSION}/{filename}"
 
         archive = BIN_DIR / filename
