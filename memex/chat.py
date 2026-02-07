@@ -1,5 +1,6 @@
 """Chat panel widget for Memex."""
 
+import asyncio
 import json
 from typing import Callable, Awaitable
 
@@ -55,12 +56,20 @@ class ChatEngine:
         self.tools = get_all_tools()
         self.first_run = first_run
         self._tool_names_this_turn: list[str] = []
+        self._memory_loaded = False
 
-        # Load previous conversation memory from the graph
-        if not first_run:
-            prior = load_recent_conversations(limit=20)
-            if prior:
-                self.messages.extend(prior)
+    def _load_memory_sync(self) -> None:
+        """Load previous conversation memory from the graph (sync, call from thread)."""
+        if self._memory_loaded or self.first_run:
+            return
+        prior = load_recent_conversations(limit=20)
+        if prior:
+            self.messages[:0] = prior  # prepend
+        self._memory_loaded = True
+
+    async def load_memory(self) -> None:
+        """Load conversation memory without blocking the event loop."""
+        await asyncio.to_thread(self._load_memory_sync)
 
     async def send(
         self,
@@ -86,7 +95,7 @@ class ChatEngine:
             from .onboarding import get_system_prompt
             system_prompt = get_system_prompt(self.first_run)
 
-            for chunk in self.provider.stream(
+            async for chunk in self.provider.stream(
                 system_prompt, self.messages, self.tools
             ):
                 if chunk.type == "text":
@@ -123,9 +132,9 @@ class ChatEngine:
                     }
                 )
 
-                # Execute tools and add results
+                # Execute tools in thread to not block the event loop
                 for tc in tool_calls:
-                    result = execute_tool(tc.name, tc.arguments)
+                    result = await asyncio.to_thread(execute_tool, tc.name, tc.arguments)
                     self.messages.append(
                         {
                             "role": "tool",
@@ -139,8 +148,10 @@ class ChatEngine:
             if text_buffer:
                 self.messages.append({"role": "assistant", "content": text_buffer})
 
-                # Auto-ingest this conversation turn into the knowledge graph
-                ingest_conversation_turn(
+                # Auto-ingest in background thread — don't block the UI
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    ingest_conversation_turn,
                     user_input,
                     text_buffer,
                     self._tool_names_this_turn or None,
@@ -162,14 +173,9 @@ class ChatPanel(RichLog):
         """Add a user message to the display."""
         self.write(Text.from_markup(f"[bold cyan]You:[/bold cyan] {text}"))
 
-    def add_assistant_text(self, text: str) -> None:
-        """Add assistant text (streaming)."""
-        # For streaming, we append to the current line
-        self.write(text, scroll_end=True)
-
-    def start_assistant_response(self) -> None:
-        """Start a new assistant response line."""
-        self.write(Text.from_markup("[bold green]Memex:[/bold green] "), scroll_end=True)
+    def add_assistant_response(self, text: str) -> None:
+        """Add a complete assistant response as a single block."""
+        self.write(Text.from_markup(f"[bold green]Memex:[/bold green] {text}"))
 
     def add_tool_indicator(self, tool_name: str) -> None:
         """Show a tool being called."""

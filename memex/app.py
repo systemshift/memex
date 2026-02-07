@@ -1,8 +1,7 @@
 """Memex Application."""
 
 from textual.app import App, ComposeResult
-from textual.widgets import Input, Footer, Header
-from textual.containers import Container
+from textual.widgets import Input
 from textual.binding import Binding
 
 from .chat import ChatPanel, ChatEngine
@@ -12,34 +11,15 @@ class MemexApp(App):
     """Interactive interface for memex-server and dagit."""
 
     CSS = """
-    Screen {
-        layout: grid;
-        grid-size: 1;
-        grid-rows: 1fr auto;
-    }
-
-    #chat-container {
-        height: 100%;
-        border: solid $primary;
-        padding: 1;
-    }
-
     #chat-log {
-        height: 100%;
-        scrollbar-gutter: stable;
-    }
-
-    #input-container {
-        height: auto;
+        height: 1fr;
+        border: solid $primary;
         padding: 1;
     }
 
     #input {
         dock: bottom;
-    }
-
-    Footer {
-        height: auto;
+        margin: 1 1 0 1;
     }
     """
 
@@ -56,15 +36,12 @@ class MemexApp(App):
         self.first_run = first_run
         self.chat_engine = ChatEngine(first_run=first_run)
         self._current_response = ""
+        self._streaming = False
 
     def compose(self) -> ComposeResult:
         """Create the UI layout."""
-        yield Header()
-        with Container(id="chat-container"):
-            yield ChatPanel(id="chat-log")
-        with Container(id="input-container"):
-            yield Input(placeholder="Ask anything... (Ctrl+C to quit)", id="input")
-        yield Footer()
+        yield ChatPanel(id="chat-log")
+        yield Input(placeholder="Ask anything... (Ctrl+C to quit)", id="input")
 
     def on_mount(self) -> None:
         """Focus input on start."""
@@ -79,16 +56,16 @@ class MemexApp(App):
                 "Welcome to Memex. Ask questions about your knowledge graph or dagit network."
             )
             chat.add_system_message('Type "help" for commands, Ctrl+C to quit.')
+            # Load session memory in background
+            self.run_worker(self.chat_engine.load_memory())
 
     async def _auto_greet(self) -> None:
         """Send initial greeting on first run so the LLM speaks first."""
         chat = self.query_one("#chat-log", ChatPanel)
-        chat.start_assistant_response()
         self._current_response = ""
 
         async def on_text(text: str) -> None:
             self._current_response += text
-            chat.add_assistant_text(text)
 
         async def on_tool(tool_name: str) -> None:
             chat.add_tool_indicator(tool_name)
@@ -100,13 +77,17 @@ class MemexApp(App):
         except Exception as e:
             chat.add_error(str(e))
 
-        if self._current_response and not self._current_response.endswith("\n"):
-            chat.write("")
+        if self._current_response:
+            chat.add_assistant_response(self._current_response)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input."""
         user_input = event.value.strip()
         if not user_input:
+            return
+
+        # Ignore if already streaming
+        if self._streaming:
             return
 
         # Clear input
@@ -128,17 +109,18 @@ class MemexApp(App):
             self._show_help(chat)
             return
 
-        # Show user message
+        # Show user message and launch streaming in a worker
         chat.add_user_message(user_input)
+        self.run_worker(self._stream_response(user_input))
 
-        # Start assistant response
-        chat.start_assistant_response()
+    async def _stream_response(self, user_input: str) -> None:
+        """Stream LLM response as a background worker so input stays responsive."""
+        self._streaming = True
+        chat = self.query_one("#chat-log", ChatPanel)
         self._current_response = ""
 
-        # Stream response
         async def on_text(text: str) -> None:
             self._current_response += text
-            chat.add_assistant_text(text)
 
         async def on_tool(tool_name: str) -> None:
             chat.add_tool_indicator(tool_name)
@@ -148,9 +130,10 @@ class MemexApp(App):
         except Exception as e:
             chat.add_error(str(e))
 
-        # Ensure we end on a new line
-        if self._current_response and not self._current_response.endswith("\n"):
-            chat.write("")
+        if self._current_response:
+            chat.add_assistant_response(self._current_response)
+
+        self._streaming = False
 
     def _show_help(self, chat: ChatPanel) -> None:
         """Show help message."""

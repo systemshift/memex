@@ -2,7 +2,7 @@
 
 import os
 import json
-from typing import Generator
+from typing import AsyncGenerator
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -30,7 +30,7 @@ class Chunk:
 
 
 class ChatProvider:
-    """OpenAI-compatible chat provider with streaming and tool support."""
+    """OpenAI-compatible chat provider with async streaming and tool support."""
 
     def __init__(self, model: str | None = None):
         self._client = None
@@ -38,19 +38,19 @@ class ChatProvider:
 
     @property
     def client(self):
-        """Lazy-initialize OpenAI client."""
+        """Lazy-initialize async OpenAI client."""
         if self._client is None:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
-            self._client = OpenAI()
+            self._client = AsyncOpenAI()
         return self._client
 
-    def stream(
+    async def stream(
         self,
         system: str,
         messages: list[dict],
         tools: list[dict] | None = None,
-    ) -> Generator[Chunk, None, None]:
+    ) -> AsyncGenerator[Chunk, None]:
         """Stream response with tool support.
 
         Args:
@@ -75,12 +75,12 @@ class ChatProvider:
             if tools:
                 kwargs["tools"] = tools
 
-            stream = self.client.chat.completions.create(**kwargs)
+            stream = await self.client.chat.completions.create(**kwargs)
 
             # Accumulate tool calls across chunks
             tool_calls: dict[int, dict] = {}
 
-            for chunk in stream:
+            async for chunk in stream:
                 if not chunk.choices:
                     continue
 
