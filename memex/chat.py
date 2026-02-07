@@ -8,34 +8,59 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from .provider import ChatProvider, Chunk, ToolCall
-from .tools import get_all_tools, execute_tool
+from .tools import get_all_tools, execute_tool, ingest_conversation_turn, load_recent_conversations
 
 
-SYSTEM_PROMPT = """You are Memex, an intelligent assistant with access to a knowledge graph (memex) and a decentralized social network (dagit).
+SYSTEM_PROMPT = """You are Memex, a personal knowledge workstation. Everything the user says is automatically saved to their knowledge graph — they don't need to ask you to remember anything. You are the memory.
 
-Available capabilities:
-- Search and query the knowledge graph (memex_search, memex_get_node, memex_traverse, etc.)
-- Create notes and save information (memex_create_node)
-- Post to the dagit social network (dagit_post)
-- Read posts from dagit (dagit_read)
-- Check your identity (dagit_whoami)
+You have two systems:
+- **memex** (private): The user's knowledge graph. Notes, entities, relationships, raw sources — all stored locally.
+- **dagit** (public): A decentralized social network. Posts are signed with the user's cryptographic key and published to IPFS. Only post when the user explicitly asks.
 
-When users ask questions:
-1. Use the appropriate tools to find information
-2. Synthesize the results into a helpful response
-3. If saving information, confirm what was saved
+Tools — Knowledge Graph:
+- memex_search: Full-text search across all nodes
+- memex_get_node: Get a node by ID
+- memex_get_links: Get relationships for a node
+- memex_traverse: Walk the graph from a starting node
+- memex_filter: Filter nodes by type
+- memex_create_node: Create a new node (Note, Person, Concept, Document, etc.)
+- memex_create_link: Create a relationship between two nodes
+- memex_update_node: Update a node's metadata
+- memex_ingest: Ingest raw content as a content-addressed Source node (SHA256 dedup)
 
-Be concise but helpful. Use the tools proactively when they would help answer the user's question."""
+Tools — Social Network:
+- dagit_post: Publish a signed post to IPFS (only when the user asks to share)
+- dagit_read: Read posts from the network
+- dagit_whoami: Show the user's decentralized identity (DID)
+
+Behavior:
+- Every conversation turn is automatically ingested into the graph. You have memory across sessions.
+- When the user mentions people, concepts, or ideas, proactively create nodes and links to build their knowledge graph.
+- Search the graph before answering questions — the answer may already be in their memory.
+- Be concise. The user is working, not chatting."""
 
 
 class ChatEngine:
-    """Manages chat state and model interactions."""
+    """Manages chat state and model interactions.
+
+    Conversations are automatically ingested into the knowledge graph after
+    each turn, making memex the persistent desktop memory. On startup,
+    recent conversation history is loaded from the graph so the LLM has
+    context across sessions.
+    """
 
     def __init__(self, first_run: bool = False):
         self.provider = ChatProvider()
         self.messages: list[dict] = []
         self.tools = get_all_tools()
         self.first_run = first_run
+        self._tool_names_this_turn: list[str] = []
+
+        # Load previous conversation memory from the graph
+        if not first_run:
+            prior = load_recent_conversations(limit=20)
+            if prior:
+                self.messages.extend(prior)
 
     async def send(
         self,
@@ -51,6 +76,7 @@ class ChatEngine:
             on_tool: Callback for tool call notifications
         """
         self.messages.append({"role": "user", "content": user_input})
+        self._tool_names_this_turn = []
 
         max_turns = 10
         for _ in range(max_turns):
@@ -69,6 +95,7 @@ class ChatEngine:
 
                 elif chunk.type == "tool_call":
                     tool_calls.append(chunk.tool_call)
+                    self._tool_names_this_turn.append(chunk.tool_call.name)
                     await on_tool(f"[{chunk.tool_call.name}]")
 
                 elif chunk.type == "error":
@@ -111,6 +138,13 @@ class ChatEngine:
             # No tool calls - conversation turn complete
             if text_buffer:
                 self.messages.append({"role": "assistant", "content": text_buffer})
+
+                # Auto-ingest this conversation turn into the knowledge graph
+                ingest_conversation_turn(
+                    user_input,
+                    text_buffer,
+                    self._tool_names_this_turn or None,
+                )
             return
 
     def clear(self) -> None:

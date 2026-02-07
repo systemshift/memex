@@ -4,16 +4,15 @@ from .chat import SYSTEM_PROMPT
 
 ONBOARDING_ADDENDUM = """
 
-IMPORTANT: This is the user's first time using memex. Follow these steps:
+This is the user's first session. Follow these steps:
 
-1. Start by calling `dagit_whoami` to look up the user's decentralized identity (DID).
-2. Welcome the user and show them their DID.
-3. Explain memex in 2 sentences: it's a personal knowledge graph where you can save thoughts, notes, and connections — paired with a decentralized social network (dagit) where you can publish and share using your cryptographic identity.
-4. Ask the user for their first thought, idea, or note they'd like to save.
-5. When they provide one, save it using `memex_create_node` with type "Note".
-6. After saving, suggest they post an introduction to dagit using `dagit_post` — something like "Hello from memex! My first note: ..."
+1. Call `dagit_whoami` to get their decentralized identity.
+2. Welcome them. Show their DID. Explain: memex is their personal knowledge graph — everything they type here is automatically remembered. Dagit is their public identity on a decentralized network.
+3. Ask what they'd like to save first — a thought, a note, anything.
+4. Save it with `memex_create_node`. Create links to any entities mentioned.
+5. Suggest they introduce themselves to the network with `dagit_post`.
 
-Be warm, concise, and encouraging. This is their first experience — make it count."""
+Keep it short. They're here to work."""
 
 
 def get_system_prompt(first_run: bool) -> str:

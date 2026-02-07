@@ -130,6 +130,73 @@ MEMEX_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "memex_ingest",
+            "description": "Ingest raw content into memex as a content-addressed Source node. Use this to save articles, web pages, documents, or any raw text the user wants to remember. Content is deduplicated by SHA256 hash.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The raw content to ingest",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Format hint (text, json, markdown, etc.)",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memex_update_node",
+            "description": "Update an existing node's metadata or content",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Node ID to update",
+                    },
+                    "meta": {
+                        "type": "object",
+                        "description": "Metadata fields to update",
+                    },
+                },
+                "required": ["id", "meta"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memex_create_link",
+            "description": "Create a relationship between two nodes in the knowledge graph",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "Source node ID",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Target node ID",
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Relationship type (e.g. related_to, mentions, authored_by)",
+                    },
+                },
+                "required": ["source", "target", "type"],
+            },
+        },
+    },
 ]
 
 
@@ -202,6 +269,12 @@ def _execute_memex(name: str, args: dict) -> str:
         return _memex_filter(args)
     elif name == "memex_create_node":
         return _memex_create_node(args)
+    elif name == "memex_ingest":
+        return _memex_ingest(args)
+    elif name == "memex_update_node":
+        return _memex_update_node(args)
+    elif name == "memex_create_link":
+        return _memex_create_link(args)
     else:
         return f"Unknown memex tool: {name}"
 
@@ -356,11 +429,21 @@ def _memex_filter(args: dict) -> str:
 
 
 def _memex_create_node(args: dict) -> str:
+    import hashlib
+    import time
+
     ntype = args.get("type", "Note")
     content = args.get("content", "")
     title = args.get("title", "")
 
+    # Generate a stable, short ID from type + content
+    prefix = ntype.lower()
+    hash_input = f"{content}{title}{time.time()}"
+    short_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:8]
+    node_id = f"{prefix}:{short_hash}"
+
     payload = {
+        "id": node_id,
         "type": ntype,
         "meta": {
             "content": content,
@@ -379,5 +462,168 @@ def _memex_create_node(args: dict) -> str:
         return f"Create failed: {resp.status_code} - {resp.text}"
 
     data = resp.json()
-    node_id = data.get("id") or data.get("ID", "unknown")
+    node_id = data.get("id") or data.get("ID", node_id)
     return f"Created {ntype} node: {node_id}"
+
+
+def _memex_ingest(args: dict) -> str:
+    content = args.get("content", "")
+    fmt = args.get("format", "text")
+
+    if not content:
+        return "Error: content is required"
+
+    resp = httpx.post(
+        f"{_get_memex_url()}/api/ingest",
+        json={"content": content, "format": fmt},
+        timeout=10,
+    )
+
+    if resp.status_code != 200:
+        return f"Ingest failed: {resp.status_code} - {resp.text}"
+
+    data = resp.json()
+    source_id = data.get("source_id", "unknown")
+    return f"Ingested as {source_id}"
+
+
+def ingest_conversation_turn(user_msg: str, assistant_msg: str, tool_calls: list[str] | None = None) -> str | None:
+    """Ingest a conversation turn into memex. Returns source_id or None on failure.
+
+    Called automatically after each conversation exchange — this is what makes
+    memex the desktop memory. Content-addressed so duplicates are free.
+    """
+    parts = [f"User: {user_msg}", ""]
+    if tool_calls:
+        for tc in tool_calls:
+            parts.append(f"  [{tc}]")
+        parts.append("")
+    parts.append(f"Memex: {assistant_msg}")
+
+    content = "\n".join(parts)
+
+    try:
+        resp = httpx.post(
+            f"{_get_memex_url()}/api/ingest",
+            json={"content": content, "format": "conversation"},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("source_id")
+    except Exception:
+        pass
+    return None
+
+
+def load_recent_conversations(limit: int = 20) -> list[dict]:
+    """Load recent conversation turns from the graph.
+
+    Returns a list of message dicts suitable for prepending to chat history,
+    giving the LLM memory across sessions.
+    """
+    import base64
+
+    try:
+        resp = httpx.get(
+            f"{_get_memex_url()}/api/query/filter",
+            params={"type": "Source", "limit": limit},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return []
+
+        data = resp.json()
+        nodes = data.get("nodes", []) if isinstance(data, dict) else data
+
+        conversations = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            meta = node.get("Meta", {})
+            if meta.get("format") != "conversation":
+                continue
+            raw = node.get("Content", "")
+            # Content comes back as base64 from the Go API ([]byte → JSON)
+            if not raw:
+                continue
+            try:
+                content = base64.b64decode(raw).decode("utf-8", errors="replace")
+            except Exception:
+                content = raw if isinstance(raw, str) else ""
+            if not content:
+                continue
+            conversations.append({
+                "id": node.get("ID", ""),
+                "content": content,
+                "ingested_at": meta.get("ingested_at", ""),
+            })
+
+        # Sort by ingestion time (oldest first so newest is most recent context)
+        conversations.sort(key=lambda c: c.get("ingested_at", ""))
+
+        # Parse back into message pairs
+        messages = []
+        for conv in conversations:
+            content = conv["content"]
+            # Parse "User: ...\n\nMemex: ..." format
+            user_part = ""
+            assistant_part = ""
+            in_assistant = False
+            for line in content.split("\n"):
+                if line.startswith("User: "):
+                    user_part = line[6:]
+                elif line.startswith("Memex: "):
+                    assistant_part = line[7:]
+                    in_assistant = True
+                elif in_assistant:
+                    assistant_part += "\n" + line
+                elif user_part and not line.startswith("  ["):
+                    user_part += "\n" + line
+
+            if user_part and assistant_part:
+                messages.append({"role": "user", "content": user_part.strip()})
+                messages.append({"role": "assistant", "content": assistant_part.strip()})
+
+        return messages
+
+    except Exception:
+        return []
+
+
+def _memex_update_node(args: dict) -> str:
+    node_id = args.get("id", "")
+    meta = args.get("meta", {})
+
+    if not node_id:
+        return "Error: id is required"
+
+    resp = httpx.patch(
+        f"{_get_memex_url()}/api/nodes/{node_id}",
+        json={"meta": meta},
+        timeout=10,
+    )
+
+    if resp.status_code != 200:
+        return f"Update failed: {resp.status_code} - {resp.text}"
+
+    return f"Updated node: {node_id}"
+
+
+def _memex_create_link(args: dict) -> str:
+    source = args.get("source", "")
+    target = args.get("target", "")
+    link_type = args.get("type", "related_to")
+
+    if not source or not target:
+        return "Error: source and target are required"
+
+    resp = httpx.post(
+        f"{_get_memex_url()}/api/links",
+        json={"source": source, "target": target, "type": link_type},
+        timeout=10,
+    )
+
+    if resp.status_code not in (200, 201):
+        return f"Link failed: {resp.status_code} - {resp.text}"
+
+    return f"Created link: {source} --[{link_type}]--> {target}"
