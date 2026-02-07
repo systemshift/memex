@@ -1,4 +1,4 @@
-"""Chat provider for Memex."""
+"""Chat provider for Memex using OpenAI Responses API."""
 
 import os
 import json
@@ -14,7 +14,7 @@ load_dotenv()
 class ToolCall:
     """A tool call request from the model."""
 
-    id: str
+    call_id: str
     name: str
     arguments: dict
 
@@ -30,11 +30,11 @@ class Chunk:
 
 
 class ChatProvider:
-    """OpenAI-compatible chat provider with async streaming and tool support."""
+    """OpenAI Responses API provider with async streaming and tool support."""
 
     def __init__(self, model: str | None = None):
         self._client = None
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-5.2")
 
     @property
     def client(self):
@@ -45,86 +45,98 @@ class ChatProvider:
             self._client = AsyncOpenAI()
         return self._client
 
+    def _convert_tools(self, tools: list[dict]) -> list[dict]:
+        """Convert chat-completions tool format to Responses API format.
+
+        Chat completions: {"type": "function", "function": {"name": ..., "parameters": ...}}
+        Responses API:    {"type": "function", "name": ..., "parameters": ...}
+        """
+        converted = []
+        for tool in tools:
+            if tool.get("type") == "function" and "function" in tool:
+                fn = tool["function"]
+                converted.append({
+                    "type": "function",
+                    "name": fn["name"],
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {}),
+                    "strict": False,
+                })
+            else:
+                converted.append(tool)
+        return converted
+
     async def stream(
         self,
         system: str,
         messages: list[dict],
         tools: list[dict] | None = None,
+        previous_response_id: str | None = None,
     ) -> AsyncGenerator[Chunk, None]:
-        """Stream response with tool support.
+        """Stream a response using the Responses API.
 
         Args:
-            system: System prompt
-            messages: Conversation messages
-            tools: OpenAI-format tool definitions
+            system: System instructions
+            messages: Conversation messages (used as input)
+            tools: Tool definitions
+            previous_response_id: Chain to a previous response
 
         Yields:
-            Chunk objects with text, tool_calls, or completion status
+            Chunk objects with text, tool_calls, or errors
         """
-        api_messages = []
-        if system:
-            api_messages.append({"role": "system", "content": system})
-        api_messages.extend(messages)
+        from openai.types.responses import (
+            ResponseTextDeltaEvent,
+            ResponseOutputItemDoneEvent,
+            ResponseCompletedEvent,
+            ResponseFailedEvent,
+            ResponseFunctionToolCall,
+        )
 
         try:
             kwargs = {
                 "model": self.model,
-                "messages": api_messages,
+                "instructions": system,
+                "input": messages,
                 "stream": True,
             }
             if tools:
-                kwargs["tools"] = tools
+                kwargs["tools"] = self._convert_tools(tools)
+            if previous_response_id:
+                kwargs["previous_response_id"] = previous_response_id
 
-            stream = await self.client.chat.completions.create(**kwargs)
+            stream = await self.client.responses.create(**kwargs)
 
-            # Accumulate tool calls across chunks
-            tool_calls: dict[int, dict] = {}
+            async for event in stream:
+                if isinstance(event, ResponseTextDeltaEvent):
+                    yield Chunk(type="text", text=event.delta)
 
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-
-                delta = chunk.choices[0].delta
-                finish_reason = chunk.choices[0].finish_reason
-
-                # Text content
-                if delta.content:
-                    yield Chunk(type="text", text=delta.content)
-
-                # Tool calls (accumulate across chunks)
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_calls:
-                            tool_calls[idx] = {"id": "", "name": "", "args": ""}
-                        if tc.id:
-                            tool_calls[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_calls[idx]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                tool_calls[idx]["args"] += tc.function.arguments
-
-                # Finish with tool calls
-                if finish_reason == "tool_calls":
-                    for idx in sorted(tool_calls.keys()):
-                        tc = tool_calls[idx]
+                elif isinstance(event, ResponseOutputItemDoneEvent):
+                    item = event.item
+                    if isinstance(item, ResponseFunctionToolCall):
                         try:
-                            args = json.loads(tc["args"]) if tc["args"] else {}
-                            yield Chunk(
-                                type="tool_call",
-                                tool_call=ToolCall(tc["id"], tc["name"], args),
-                            )
+                            args = json.loads(item.arguments) if item.arguments else {}
                         except json.JSONDecodeError:
-                            yield Chunk(
-                                type="error",
-                                error=f"Failed to parse tool args: {tc['args']}",
-                            )
-                    tool_calls.clear()
+                            args = {}
+                        yield Chunk(
+                            type="tool_call",
+                            tool_call=ToolCall(
+                                call_id=item.call_id,
+                                name=item.name,
+                                arguments=args,
+                            ),
+                        )
 
-                # Normal completion
-                elif finish_reason == "stop":
+                elif isinstance(event, ResponseCompletedEvent):
+                    self._last_response_id = event.response.id
                     yield Chunk(type="done")
+
+                elif isinstance(event, ResponseFailedEvent):
+                    yield Chunk(type="error", error="Response failed")
 
         except Exception as e:
             yield Chunk(type="error", error=str(e))
+
+    @property
+    def last_response_id(self) -> str | None:
+        """Get the last response ID for chaining tool results."""
+        return getattr(self, "_last_response_id", None)

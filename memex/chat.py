@@ -87,16 +87,27 @@ class ChatEngine:
         self.messages.append({"role": "user", "content": user_input})
         self._tool_names_this_turn = []
 
+        from .onboarding import get_system_prompt
+        system_prompt = get_system_prompt(self.first_run)
+
+        # First request uses full message history
+        prev_id = None
+
         max_turns = 10
         for _ in range(max_turns):
             text_buffer = ""
             tool_calls: list[ToolCall] = []
 
-            from .onboarding import get_system_prompt
-            system_prompt = get_system_prompt(self.first_run)
+            # On first iteration, send full messages. On tool-result iterations,
+            # send tool outputs with previous_response_id.
+            if prev_id is None:
+                input_msgs = self.messages
+            else:
+                input_msgs = self._pending_tool_outputs
 
             async for chunk in self.provider.stream(
-                system_prompt, self.messages, self.tools
+                system_prompt, input_msgs, self.tools,
+                previous_response_id=prev_id,
             ):
                 if chunk.type == "text":
                     await on_text(chunk.text)
@@ -111,37 +122,18 @@ class ChatEngine:
                     await on_text(f"\nError: {chunk.error}")
                     return
 
-            # If there were tool calls, execute them and continue
+            # If there were tool calls, execute them and send results back
             if tool_calls:
-                # Add assistant message with tool calls
-                self.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": text_buffer or None,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": json.dumps(tc.arguments),
-                                },
-                            }
-                            for tc in tool_calls
-                        ],
-                    }
-                )
+                prev_id = self.provider.last_response_id
+                self._pending_tool_outputs = []
 
-                # Execute tools in thread to not block the event loop
                 for tc in tool_calls:
                     result = await asyncio.to_thread(execute_tool, tc.name, tc.arguments)
-                    self.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result,
-                        }
-                    )
+                    self._pending_tool_outputs.append({
+                        "type": "function_call_output",
+                        "call_id": tc.call_id,
+                        "output": result,
+                    })
                 continue
 
             # No tool calls - conversation turn complete

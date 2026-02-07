@@ -5,7 +5,7 @@ description = "AI-native knowledge graph with decentralized social networking"
 requires-python = ">=3.10"
 dependencies = [
     "textual>=0.50",
-    "openai>=1.0",
+    "openai>=2.0",
     "httpx>=0.25",
     "rich>=13.0",
     "python-dotenv>=1.0",
