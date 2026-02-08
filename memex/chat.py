@@ -170,8 +170,8 @@ class ChatPanel(RichLog):
         self.write(Text.from_markup(f"[bold green]Memex:[/bold green] {text}"))
 
     def add_tool_indicator(self, tool_name: str) -> None:
-        """Show a tool being called."""
-        self.write(Text.from_markup(f"[dim]{tool_name}[/dim]"))
+        """Show a tool being called — not used directly, status line handles this."""
+        pass
 
     def add_error(self, error: str) -> None:
         """Display an error message."""

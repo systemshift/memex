@@ -15,6 +15,8 @@ class MemexApp(App):
         height: 1fr;
         border: solid $primary;
         padding: 1;
+        border-subtitle-color: $warning;
+        border-subtitle-style: italic;
     }
 
     #input {
@@ -38,6 +40,11 @@ class MemexApp(App):
         self._current_response = ""
         self._streaming = False
 
+    def _set_status(self, text: str) -> None:
+        """Update status text shown on the chat panel border."""
+        chat = self.query_one("#chat-log", ChatPanel)
+        chat.border_subtitle = text or ""
+
     def compose(self) -> ComposeResult:
         """Create the UI layout."""
         yield ChatPanel(id="chat-log")
@@ -57,17 +64,28 @@ class MemexApp(App):
             )
             chat.add_system_message('Type "help" for commands, Ctrl+C to quit.')
             # Load session memory in background
-            self.run_worker(self.chat_engine.load_memory())
+            self._set_status("Loading memory...")
+            self.run_worker(self._load_memory())
 
     async def _auto_greet(self) -> None:
         """Send initial greeting on first run so the LLM speaks first."""
         chat = self.query_one("#chat-log", ChatPanel)
         self._current_response = ""
+        self._set_status("Setting up...")
+
+        _text_status_set = False
 
         async def on_text(text: str) -> None:
+            nonlocal _text_status_set
             self._current_response += text
+            if not _text_status_set:
+                self._set_status("Receiving response...")
+                _text_status_set = True
 
         async def on_tool(tool_name: str) -> None:
+            nonlocal _text_status_set
+            _text_status_set = False
+            self._set_status(f"Running {tool_name}...")
             chat.add_tool_indicator(tool_name)
 
         try:
@@ -79,6 +97,7 @@ class MemexApp(App):
 
         if self._current_response:
             chat.add_assistant_response(self._current_response)
+        self._set_status("")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input."""
@@ -118,11 +137,27 @@ class MemexApp(App):
         self._streaming = True
         chat = self.query_one("#chat-log", ChatPanel)
         self._current_response = ""
+        self._set_status("Thinking...")
+
+        _text_status_set = False
 
         async def on_text(text: str) -> None:
+            nonlocal _text_status_set
             self._current_response += text
+            if not _text_status_set:
+                self._set_status("Receiving response...")
+                _text_status_set = True
 
         async def on_tool(tool_name: str) -> None:
+            nonlocal _text_status_set
+            _text_status_set = False  # reset so next text chunk updates status
+            label = tool_name.strip("[]")
+            if label.startswith("memex_"):
+                self._set_status(f"Searching knowledge graph ({label})...")
+            elif label.startswith("dagit_"):
+                self._set_status(f"Querying dagit network ({label})...")
+            else:
+                self._set_status(f"Running {label}...")
             chat.add_tool_indicator(tool_name)
 
         try:
@@ -133,7 +168,13 @@ class MemexApp(App):
         if self._current_response:
             chat.add_assistant_response(self._current_response)
 
+        self._set_status("")
         self._streaming = False
+
+    async def _load_memory(self) -> None:
+        """Load session memory in background."""
+        await self.chat_engine.load_memory()
+        self._set_status("")
 
     def _show_help(self, chat: ChatPanel) -> None:
         """Show help message."""
