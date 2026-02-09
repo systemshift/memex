@@ -1,12 +1,17 @@
 # Memex
 
-AI-native knowledge graph + decentralized social network.
+AI-native knowledge graph + decentralized social network. Single binary, no runtime dependencies.
 
 ## Install
 
 ```bash
-pip install memex-graph
-memex-stack
+curl -fsSL https://raw.githubusercontent.com/systemshift/memex/main/install.sh | sh
+```
+
+Or with Bun:
+
+```bash
+bun install && bun run start
 ```
 
 ## What happens
@@ -23,7 +28,6 @@ memex-stack
 
 ## Prerequisites
 
-- Python 3.10+
 - `OPENAI_API_KEY` environment variable set
 
 ```bash
@@ -35,7 +39,7 @@ export OPENAI_API_KEY=sk-...
 ```
 ┌─────────────────────────────────────┐
 │              memex TUI              │
-│         (textual chat UI)           │
+│           (Ink terminal)            │
 ├─────────────┬───────────────────────┤
 │  OpenAI API │    function calls     │
 ├─────────────┼───────────┬───────────┤
@@ -49,6 +53,7 @@ export OPENAI_API_KEY=sk-...
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENAI_API_KEY` | (required) | OpenAI API key |
+| `OPENAI_MODEL` | `gpt-5.2` | LLM model to use |
 | `PORT` | `8080` | memex-server port |
 | `MEMEX_BACKEND` | `sqlite` | Storage backend (`sqlite` or `neo4j`) |
 | `SQLITE_PATH` | `~/.memex/memex.db` | Database path |
@@ -57,7 +62,7 @@ export OPENAI_API_KEY=sk-...
 ## CLI Flags
 
 ```
-memex-stack [options]
+memex [options]
 
   --server-only     Start server without TUI
   --port PORT       Server port (default: 8080)
@@ -65,6 +70,17 @@ memex-stack [options]
   --db-path PATH    SQLite database path
   --skip-ipfs       Skip IPFS daemon setup
   --skip-download   Don't auto-download binaries
+  -h, --help        Show help
+```
+
+## Build from source
+
+Requires [Bun](https://bun.sh).
+
+```bash
+bun install
+bun run build          # compile for current platform
+bun run build:linux-x64    # cross-compile
 ```
 
 ## License
