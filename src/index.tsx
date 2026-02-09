@@ -185,14 +185,24 @@ async function main() {
   // Step 10: Launch TUI
   log("Launching memex...");
 
+  // Enter alternate screen buffer (like Textual / vim / Claude Code)
+  process.stdout.write("\x1b[?1049h"); // enter alt screen
+  process.stdout.write("\x1b[H");      // move cursor home
+
+  const exitAltScreen = () => {
+    process.stdout.write("\x1b[?1049l"); // exit alt screen
+  };
+
   const { waitUntilExit } = render(<App firstRun={firstRun} />);
   await waitUntilExit();
 
   // Step 11: Cleanup
+  exitAltScreen();
   cleanupAll();
 }
 
 main().catch((e) => {
+  process.stdout.write("\x1b[?1049l"); // exit alt screen on crash
   console.error(e);
   cleanupAll();
   process.exit(1);

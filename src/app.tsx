@@ -1,9 +1,10 @@
 /**
- * Ink root: layout, state, input handling.
+ * Ink root: fullscreen layout, state, input handling.
+ * Uses alternate screen buffer for a proper TUI experience.
  */
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Box, useInput, useApp } from "ink";
+import { Box, useInput, useApp, Text } from "ink";
 import { ChatLog, type ChatMessage } from "./components/ChatLog";
 import { InputBar } from "./components/InputBar";
 import { ChatEngine } from "./chat";
@@ -14,8 +15,29 @@ interface AppProps {
 
 let msgCounter = 0;
 
+function useTerminalSize() {
+  const [size, setSize] = useState({
+    rows: process.stdout.rows || 24,
+    cols: process.stdout.columns || 80,
+  });
+
+  useEffect(() => {
+    const onResize = () => {
+      setSize({
+        rows: process.stdout.rows || 24,
+        cols: process.stdout.columns || 80,
+      });
+    };
+    process.stdout.on("resize", onResize);
+    return () => { process.stdout.off("resize", onResize); };
+  }, []);
+
+  return size;
+}
+
 export function App({ firstRun }: AppProps) {
   const { exit } = useApp();
+  const { rows, cols } = useTerminalSize();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -23,7 +45,6 @@ export function App({ firstRun }: AppProps) {
   const [status, setStatus] = useState("");
   const engineRef = useRef<ChatEngine | null>(null);
 
-  // Initialize engine
   if (!engineRef.current) {
     engineRef.current = new ChatEngine(firstRun);
   }
@@ -61,9 +82,7 @@ export function App({ firstRun }: AppProps) {
           },
         )
         .then(() => {
-          if (buffer) {
-            addMessage("assistant", buffer);
-          }
+          if (buffer) addMessage("assistant", buffer);
           setStreamingText("");
           setStatus("");
           setStreaming(false);
@@ -75,8 +94,7 @@ export function App({ firstRun }: AppProps) {
           setStreaming(false);
         });
     } else {
-      addMessage("system", "Welcome to Memex. Ask questions about your knowledge graph or dagit network.");
-      addMessage("system", 'Type "help" for commands, Ctrl+C to quit.');
+      addMessage("system", "Welcome to Memex. Type \"help\" for commands, Ctrl+C to quit.");
       setStatus("Loading memory...");
       engine.loadMemory().then(() => setStatus("")).catch(() => setStatus(""));
     }
@@ -88,7 +106,6 @@ export function App({ firstRun }: AppProps) {
       if (!trimmed || streaming) return;
       setInput("");
 
-      // Special commands
       if (trimmed.toLowerCase() === "exit" || trimmed.toLowerCase() === "quit") {
         exit();
         return;
@@ -100,16 +117,8 @@ export function App({ firstRun }: AppProps) {
         return;
       }
       if (trimmed.toLowerCase() === "help") {
-        addMessage("system", "Commands:");
-        addMessage("system", '  help  - Show this help');
-        addMessage("system", '  clear - Clear chat history');
-        addMessage("system", '  exit  - Quit the application');
-        addMessage("system", "");
-        addMessage("system", "Examples:");
-        addMessage("system", '  "search for notes about topic"');
-        addMessage("system", '  "what\'s my dagit identity"');
-        addMessage("system", '  "save this as a note: <your content>"');
-        addMessage("system", '  "post to dagit: <your message>"');
+        addMessage("system", "Commands: help, clear, exit");
+        addMessage("system", "Just type naturally — memex searches your graph and uses tools automatically.");
         return;
       }
 
@@ -144,9 +153,7 @@ export function App({ firstRun }: AppProps) {
           },
         )
         .then(() => {
-          if (buffer) {
-            addMessage("assistant", buffer);
-          }
+          if (buffer) addMessage("assistant", buffer);
           setStreamingText("");
           setStatus("");
           setStreaming(false);
@@ -161,19 +168,31 @@ export function App({ firstRun }: AppProps) {
     [streaming, engine, addMessage, exit],
   );
 
-  // Handle Ctrl+C
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       exit();
     }
   });
 
+  // Layout: chat panel takes all space minus 1 row for input
+  const chatHeight = rows - 1;
+
   return (
-    <Box flexDirection="column" height="100%">
-      <Box flexDirection="column" flexGrow={1}>
-        <ChatLog messages={messages} streamingText={streamingText} status={status} />
-      </Box>
-      <InputBar value={input} onChange={setInput} onSubmit={handleSubmit} disabled={streaming} />
+    <Box flexDirection="column" width={cols} height={rows}>
+      <ChatLog
+        messages={messages}
+        streamingText={streamingText}
+        status={status}
+        height={chatHeight}
+        width={cols}
+      />
+      <InputBar
+        value={input}
+        onChange={setInput}
+        onSubmit={handleSubmit}
+        disabled={streaming}
+        width={cols}
+      />
     </Box>
   );
 }

@@ -164,10 +164,12 @@ export function cleanupAll(): void {
 
 export function registerCleanup(): void {
   process.on("SIGINT", () => {
+    process.stdout.write("\x1b[?1049l"); // exit alt screen
     cleanupAll();
     process.exit(0);
   });
   process.on("SIGTERM", () => {
+    process.stdout.write("\x1b[?1049l"); // exit alt screen
     cleanupAll();
     process.exit(0);
   });

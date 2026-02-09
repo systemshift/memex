@@ -1,5 +1,5 @@
 /**
- * Text input with "> " prompt.
+ * Text input with "> " prompt, fixed at bottom.
  */
 
 import React from "react";
@@ -11,12 +11,13 @@ interface InputBarProps {
   onChange: (value: string) => void;
   onSubmit: (value: string) => void;
   disabled: boolean;
+  width: number;
 }
 
-export function InputBar({ value, onChange, onSubmit, disabled }: InputBarProps) {
+export function InputBar({ value, onChange, onSubmit, disabled, width }: InputBarProps) {
   if (disabled) {
     return (
-      <Box>
+      <Box width={width} height={1}>
         <Text dimColor>{">"} </Text>
         <Text dimColor>...</Text>
       </Box>
@@ -24,7 +25,7 @@ export function InputBar({ value, onChange, onSubmit, disabled }: InputBarProps)
   }
 
   return (
-    <Box>
+    <Box width={width} height={1}>
       <Text color="cyan" bold>{">"} </Text>
       <TextInput
         value={value}
