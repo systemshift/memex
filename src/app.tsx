@@ -147,6 +147,12 @@ export function App({ firstRun }: AppProps) {
               setStatus(`Searching knowledge graph (${label})...`);
             } else if (label.startsWith("dagit_")) {
               setStatus(`Querying dagit network (${label})...`);
+            } else if (label === "email_check_now") {
+              setStatus(`Checking email...`);
+            } else if (label === "email_configure") {
+              setStatus(`Configuring email...`);
+            } else if (label === "email_status") {
+              setStatus(`Checking email status...`);
             } else {
               setStatus(`Running ${label}...`);
             }

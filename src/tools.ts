@@ -1,11 +1,13 @@
 /**
- * 14 tool definitions + execution (9 memex, 5 dagit).
+ * 17 tool definitions + execution (9 memex, 5 dagit, 3 email).
  */
 
 import { createHash } from "crypto";
 import * as identity from "./identity";
 import * as messages from "./messages";
 import * as ipfs from "./ipfs";
+import * as email from "./email";
+import { ingestNewEmails } from "./email-ingest";
 
 function getMemexUrl(): string {
   return process.env.MEMEX_URL ?? "http://localhost:8080";
@@ -205,6 +207,40 @@ export const TOOL_DEFS: any[] = [
     },
     strict: false,
   },
+  // Email tools
+  {
+    type: "function",
+    name: "email_status",
+    description: "Check email integration status: whether configured, connection health, domain filters, last check time",
+    parameters: { type: "object", properties: {}, required: [] },
+    strict: false,
+  },
+  {
+    type: "function",
+    name: "email_configure",
+    description: "Configure email integration: set IMAP credentials, add/remove domain filters, enable/disable. Use action 'set_credentials' to save IMAP login, 'add_filter'/'remove_filter' to manage domain filters, 'enable'/'disable' to toggle.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", description: "Action: set_credentials, add_filter, remove_filter, enable, disable" },
+        host: { type: "string", description: "IMAP host (e.g. imap.gmail.com)" },
+        port: { type: "integer", description: "IMAP port (default 993)" },
+        user: { type: "string", description: "Email address / username" },
+        pass: { type: "string", description: "Password or app password" },
+        tls: { type: "boolean", description: "Use TLS (default true)" },
+        filter: { type: "string", description: "Domain filter pattern for add_filter/remove_filter (e.g. *.substack.com)" },
+      },
+      required: ["action"],
+    },
+    strict: false,
+  },
+  {
+    type: "function",
+    name: "email_check_now",
+    description: "Immediately poll for new emails matching domain filters, ingest them, and extract noteworthy entities using LLM",
+    parameters: { type: "object", properties: {}, required: [] },
+    strict: false,
+  },
 ];
 
 // --- Tool Execution ---
@@ -213,6 +249,7 @@ export async function executeTool(name: string, args: Record<string, any>): Prom
   try {
     if (name.startsWith("dagit_")) return await executeDagit(name, args);
     if (name.startsWith("memex_")) return await executeMemex(name, args);
+    if (name.startsWith("email_")) return await executeEmail(name, args);
     return `Unknown tool: ${name}`;
   } catch (e: any) {
     return `Error: ${e.message}`;
@@ -440,13 +477,126 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
   }
 }
 
+// --- Email tool execution ---
+
+async function executeEmail(name: string, args: Record<string, any>): Promise<string> {
+  switch (name) {
+    case "email_status": {
+      const config = email.loadConfig();
+      const configured = !!(config.credentials);
+      const lines = [
+        `Configured: ${configured}`,
+        `Enabled: ${config.enabled}`,
+        `Filters: ${config.filters.length ? config.filters.join(", ") : "(none — all emails accepted)"}`,
+        `Mailbox: ${config.mailbox ?? "INBOX"}`,
+      ];
+      if (config.lastCheckedUid != null) {
+        lines.push(`Last checked UID: ${config.lastCheckedUid}`);
+      }
+      if (configured && config.enabled) {
+        const result = await email.testConnection(config.credentials!);
+        lines.push(`Connection: ${result.ok ? "OK" : "FAILED — " + result.error}`);
+      }
+      return lines.join("\n");
+    }
+
+    case "email_configure": {
+      const config = email.loadConfig();
+      const action = args.action ?? "";
+
+      switch (action) {
+        case "set_credentials": {
+          if (!args.host || !args.user || !args.pass) {
+            return "Error: host, user, and pass are required for set_credentials";
+          }
+          const creds: email.EmailCreds = {
+            host: args.host,
+            port: args.port ?? 993,
+            user: args.user,
+            pass: args.pass,
+            tls: args.tls ?? true,
+          };
+          // Test connection before saving
+          const result = await email.testConnection(creds);
+          if (!result.ok) {
+            return `Connection failed: ${result.error}\nCredentials were NOT saved.`;
+          }
+          config.credentials = creds;
+          config.enabled = true;
+          email.saveConfig(config);
+          return `Connected successfully! Credentials saved.\nUser: ${creds.user}\nHost: ${creds.host}:${creds.port}\nFilters: ${config.filters.join(", ")}\nEmail integration is now enabled.`;
+        }
+
+        case "add_filter": {
+          const pattern = args.filter;
+          if (!pattern) return "Error: filter pattern is required";
+          if (!config.filters.includes(pattern)) {
+            config.filters.push(pattern);
+            email.saveConfig(config);
+          }
+          return `Filters: ${config.filters.join(", ")}`;
+        }
+
+        case "remove_filter": {
+          const pattern = args.filter;
+          if (!pattern) return "Error: filter pattern is required";
+          config.filters = config.filters.filter(f => f !== pattern);
+          email.saveConfig(config);
+          return `Filters: ${config.filters.length ? config.filters.join(", ") : "(none — all emails accepted)"}`;
+        }
+
+        case "enable": {
+          if (!config.credentials) return "Error: configure credentials first";
+          config.enabled = true;
+          email.saveConfig(config);
+          return "Email integration enabled.";
+        }
+
+        case "disable": {
+          config.enabled = false;
+          email.saveConfig(config);
+          return "Email integration disabled.";
+        }
+
+        default:
+          return `Unknown action: ${action}. Use: set_credentials, add_filter, remove_filter, enable, disable`;
+      }
+    }
+
+    case "email_check_now": {
+      if (!email.isConfigured()) {
+        return "Email not configured. Use email_configure to set up IMAP credentials first.";
+      }
+      try {
+        const result = await ingestNewEmails();
+        if (result.emailsFound === 0) {
+          return "No new matching emails found.";
+        }
+        return `Found ${result.emailsFound} new emails, processed ${result.emailsProcessed}. Created ${result.extractionsCreated} extractions.`;
+      } catch (e: any) {
+        return `Email check failed: ${e.message}`;
+      }
+    }
+
+    default:
+      return `Unknown email tool: ${name}`;
+  }
+}
+
 // --- Conversation helpers ---
+
+const CREDENTIAL_PATTERN = /password|app.?password|imap.*pass/i;
 
 export async function ingestConversationTurn(
   userMsg: string,
   assistantMsg: string,
   toolCalls?: string[],
 ): Promise<string | null> {
+  // Skip ingestion when email_configure was called (prevents passwords from entering the graph)
+  if (toolCalls?.some(tc => tc === "email_configure")) return null;
+  // Also skip if user message looks like it contains credentials
+  if (CREDENTIAL_PATTERN.test(userMsg)) return null;
+
   const parts = [`User: ${userMsg}`, ""];
   if (toolCalls?.length) {
     for (const tc of toolCalls) parts.push(`  [${tc}]`);

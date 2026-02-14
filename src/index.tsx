@@ -8,6 +8,8 @@ import { join } from "path";
 import { homedir } from "os";
 import { App } from "./app";
 import { ensureMemexServer, ensureIpfs } from "./binaries";
+import * as emailModule from "./email";
+import { ingestNewEmails } from "./email-ingest";
 import {
   ensureIpfsRepo,
   isIpfsRunning,
@@ -168,6 +170,20 @@ async function main() {
 
   // Set MEMEX_URL for tools
   process.env.MEMEX_URL = serverUrl;
+
+  // Auto-check email on startup (fire-and-forget, non-blocking)
+  if (emailModule.isConfigured()) {
+    log("Checking email...");
+    ingestNewEmails().then((result) => {
+      if (result.emailsFound > 0) {
+        log(`Email: ${result.emailsFound} new, ${result.extractionsCreated} extractions`);
+      } else {
+        log("Email: no new messages");
+      }
+    }).catch((e: any) => {
+      warn(`Email check failed: ${e.message}`);
+    });
+  }
 
   if (opts.serverOnly) {
     log("Server running. Press Ctrl+C to stop.");
