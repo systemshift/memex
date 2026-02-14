@@ -156,6 +156,16 @@ async function main() {
     log(`Identity: ${did}`);
   }
 
+  // Import dagit key into Kubo keystore (fire-and-forget)
+  if (ipfsBin && !opts.skipIpfs) {
+    const keyProc = Bun.spawn(["python3", "-c", "from dagit.feed import ensure_dagit_key; ensure_dagit_key()"], {
+      stdout: "ignore", stderr: "pipe",
+    });
+    keyProc.exited.then((code) => {
+      if (code === 0) log("Dagit key imported into Kubo");
+    }).catch(() => {});
+  }
+
   // Step 7: Start memex-server
   await startMemexServer(serverBin, opts.port, opts.backend, opts.dbPath);
 
@@ -183,6 +193,22 @@ async function main() {
     }).catch((e: any) => {
       warn(`Email check failed: ${e.message}`);
     });
+  }
+
+  // Auto-check followed feeds on startup (fire-and-forget)
+  if (ipfsBin && !opts.skipIpfs) {
+    const { existsSync } = await import("fs");
+    const followingFile = join(homedir(), ".dagit", "following.json");
+    if (existsSync(followingFile)) {
+      log("Checking followed feeds...");
+      const feedProc = Bun.spawn(["dagit", "check-feeds"], { stdout: "pipe", stderr: "ignore" });
+      feedProc.exited.then(async (code) => {
+        if (code === 0) {
+          const out = await new Response(feedProc.stdout).text();
+          log(`Feeds: ${out.trim()}`);
+        }
+      }).catch(() => {});
+    }
   }
 
   if (opts.serverOnly) {

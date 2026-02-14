@@ -145,6 +145,14 @@ export function App({ firstRun }: AppProps) {
             const label = toolName.replace(/[\[\]]/g, "");
             if (label.startsWith("memex_")) {
               setStatus(`Searching knowledge graph (${label})...`);
+            } else if (label === "dagit_follow") {
+              setStatus("Following DID...");
+            } else if (label === "dagit_unfollow") {
+              setStatus("Unfollowing DID...");
+            } else if (label === "dagit_following") {
+              setStatus("Listing followed feeds...");
+            } else if (label === "dagit_check_feeds") {
+              setStatus("Checking followed feeds...");
             } else if (label.startsWith("dagit_")) {
               setStatus(`Querying dagit network (${label})...`);
             } else if (label === "email_check_now") {

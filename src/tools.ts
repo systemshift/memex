@@ -1,5 +1,5 @@
 /**
- * 17 tool definitions + execution (9 memex, 5 dagit, 3 email).
+ * 21 tool definitions + execution (9 memex, 9 dagit, 3 email).
  */
 
 import { createHash } from "crypto";
@@ -205,6 +205,48 @@ export const TOOL_DEFS: any[] = [
       },
       required: ["cid"],
     },
+    strict: false,
+  },
+  // Dagit follow/feed tools
+  {
+    type: "function",
+    name: "dagit_follow",
+    description: "Follow a person by their DID. Their posts become discoverable via IPNS feed resolution.",
+    parameters: {
+      type: "object",
+      properties: {
+        did: { type: "string", description: "The DID (did:key:z...) of the person to follow" },
+        alias: { type: "string", description: "Optional friendly name for this person" },
+      },
+      required: ["did"],
+    },
+    strict: false,
+  },
+  {
+    type: "function",
+    name: "dagit_unfollow",
+    description: "Unfollow a person by their DID",
+    parameters: {
+      type: "object",
+      properties: {
+        did: { type: "string", description: "The DID of the person to unfollow" },
+      },
+      required: ["did"],
+    },
+    strict: false,
+  },
+  {
+    type: "function",
+    name: "dagit_following",
+    description: "List all followed DIDs and their feed status",
+    parameters: { type: "object", properties: {}, required: [] },
+    strict: false,
+  },
+  {
+    type: "function",
+    name: "dagit_check_feeds",
+    description: "Poll all followed feeds via IPNS, fetch new posts, verify signatures, and ingest into the knowledge graph",
+    parameters: { type: "object", properties: {}, required: [] },
     strict: false,
   },
   // Email tools
@@ -436,6 +478,21 @@ async function executeMemex(name: string, args: Record<string, any>): Promise<st
   }
 }
 
+function runDagitCli(args: string[], timeoutMs = 60000): string {
+  const result = Bun.spawnSync(["dagit", ...args], {
+    stdout: "pipe", stderr: "pipe",
+    timeout: timeoutMs,
+  });
+  const out = new TextDecoder().decode(result.stdout).trim();
+  const err = new TextDecoder().decode(result.stderr).trim();
+  if (result.exitCode !== 0) throw new Error(err || out || `dagit ${args[0]} failed`);
+  return out;
+}
+
+function runDagitPython(code: string): void {
+  Bun.spawnSync(["python3", "-c", code], { stdout: "ignore", stderr: "ignore" });
+}
+
 async function executeDagit(name: string, args: Record<string, any>): Promise<string> {
   switch (name) {
     case "dagit_whoami": {
@@ -448,6 +505,8 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
       if (!args.content) return "Error: Content is required";
       if (!(await ipfs.isAvailable())) return "Error: IPFS daemon not available";
       const cid = await messages.publish(args.content, args.refs ?? undefined, args.tags ?? undefined);
+      // Update IPNS feed index (fire-and-forget)
+      runDagitPython(`from dagit.feed import publish_feed; publish_feed("${cid}")`);
       return JSON.stringify({ cid, content: args.content, refs: args.refs, tags: args.tags }, null, 2);
     }
 
@@ -462,6 +521,7 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
       if (!args.cid || !args.content) return "Error: CID and content are required";
       if (!(await ipfs.isAvailable())) return "Error: IPFS daemon not available";
       const replyCid = await messages.publish(args.content, [args.cid], args.tags ?? undefined);
+      runDagitPython(`from dagit.feed import publish_feed; publish_feed("${replyCid}")`);
       return JSON.stringify({ cid: replyCid, refs: [args.cid], tags: args.tags, content: args.content }, null, 2);
     }
 
@@ -470,6 +530,27 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
       if (!(await ipfs.isAvailable())) return "Error: IPFS daemon not available";
       const [post, verified] = await messages.fetchPost(args.cid);
       return JSON.stringify({ verified, author: post.author, cid: args.cid }, null, 2);
+    }
+
+    case "dagit_follow": {
+      if (!args.did) return "Error: DID is required";
+      const cliArgs = ["follow", args.did];
+      if (args.alias) cliArgs.push("--name", args.alias);
+      return runDagitCli(cliArgs);
+    }
+
+    case "dagit_unfollow": {
+      if (!args.did) return "Error: DID is required";
+      return runDagitCli(["unfollow", args.did]);
+    }
+
+    case "dagit_following": {
+      return runDagitCli(["following"]);
+    }
+
+    case "dagit_check_feeds": {
+      if (!(await ipfs.isAvailable())) return "Error: IPFS daemon not available";
+      return runDagitCli(["check-feeds"]);
     }
 
     default:
