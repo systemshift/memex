@@ -13,6 +13,35 @@ function getMemexUrl(): string {
   return process.env.MEMEX_URL ?? "http://localhost:8080";
 }
 
+// --- Petname generator (deterministic, matches dagit/feed.py) ---
+
+const ADJECTIVES = [
+  "amber", "azure", "bold", "bright", "calm", "clear", "cool", "coral",
+  "crimson", "dark", "deep", "dry", "dusk", "faint", "fast", "firm",
+  "gold", "green", "grey", "haze", "iron", "keen", "kind", "late",
+  "light", "live", "long", "loud", "low", "mild", "mint", "mist",
+  "moss", "near", "new", "next", "north", "odd", "old", "open",
+  "pale", "pine", "plain", "proud", "pure", "quick", "quiet", "rare",
+  "raw", "red", "rich", "sage", "salt", "sand", "sharp", "shy",
+  "silk", "slim", "slow", "soft", "south", "steel", "still", "stone",
+];
+
+const NOUNS = [
+  "ash", "bay", "birch", "bloom", "brook", "cave", "cedar", "cliff",
+  "cloud", "coal", "cove", "crane", "creek", "crow", "dawn", "deer",
+  "dove", "dune", "dusk", "eagle", "elm", "ember", "fern", "finch",
+  "fire", "flint", "fox", "frost", "gale", "glen", "grove", "hawk",
+  "haze", "heath", "heron", "hill", "ivy", "jade", "jay", "lake",
+  "lark", "leaf", "marsh", "mesa", "moon", "oak", "owl", "peak",
+  "pine", "pond", "rain", "reed", "ridge", "rock", "rose", "sage",
+  "shade", "shore", "sky", "snow", "star", "storm", "stone", "vale",
+];
+
+function petname(did: string): string {
+  const h = createHash("sha256").update(did).digest();
+  return `${ADJECTIVES[h[0] % ADJECTIVES.length]}-${NOUNS[h[1] % NOUNS.length]}`;
+}
+
 // --- Tool Definitions (Responses API format) ---
 
 export const TOOL_DEFS: any[] = [
@@ -534,9 +563,26 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
 
     case "dagit_follow": {
       if (!args.did) return "Error: DID is required";
-      const cliArgs = ["follow", args.did];
-      if (args.alias) cliArgs.push("--name", args.alias);
-      return runDagitCli(cliArgs);
+      const alias = args.alias || petname(args.did);
+      const cliArgs = ["follow", args.did, "--name", alias];
+      const result = runDagitCli(cliArgs);
+      if (result.startsWith("Error") || result.startsWith("Already")) return result;
+
+      // Create Person node in graph so memex_search can find them by name
+      const nodeId = `person:${createHash("sha256").update(args.did).digest("hex").slice(0, 8)}`;
+      const url = getMemexUrl();
+      await fetch(`${url}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: nodeId,
+          type: "Person",
+          meta: { name: alias, did: args.did },
+        }),
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => {});
+
+      return result;
     }
 
     case "dagit_unfollow": {
