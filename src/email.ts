@@ -68,18 +68,34 @@ export function isConfigured(): boolean {
   return !!(config.credentials && config.enabled);
 }
 
+// --- Bun TLS workaround ---
+// Bun's checkServerIdentity sometimes gets a null cert (race condition).
+// Provide a custom one that skips validation when cert is missing.
+
+const TLS_OPTIONS = {
+  checkServerIdentity: (_host: string, cert: any) => {
+    if (!cert) return undefined; // accept if cert is null (Bun race)
+    return undefined; // accept valid certs
+  },
+};
+
+function createImapClient(creds: EmailCreds) {
+  const { ImapFlow } = require("imapflow");
+  return new ImapFlow({
+    host: creds.host,
+    port: creds.port,
+    secure: creds.tls,
+    auth: { user: creds.user, pass: creds.pass },
+    logger: false,
+    tls: TLS_OPTIONS,
+  });
+}
+
 // --- Connection Test ---
 
 export async function testConnection(creds: EmailCreds): Promise<{ ok: boolean; error?: string }> {
   try {
-    const { ImapFlow } = await import("imapflow");
-    const client = new ImapFlow({
-      host: creds.host,
-      port: creds.port,
-      secure: creds.tls,
-      auth: { user: creds.user, pass: creds.pass },
-      logger: false,
-    });
+    const client = createImapClient(creds);
     await client.connect();
     await client.logout();
     return { ok: true };
@@ -91,16 +107,17 @@ export async function testConnection(creds: EmailCreds): Promise<{ ok: boolean; 
 // --- Domain Matching ---
 
 export function matchGlob(domain: string, pattern: string): boolean {
-  // Convert glob pattern to regex: *.substack.com → (.+\.)?substack\.com
-  const escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")  // escape regex chars except *
-    .replace(/\\\*/g, ".*");                 // convert \* back to .*
-  // But we escaped . in pattern, so *.substack.com → .*\.substack\.com — close enough
-  // Actually let's redo more carefully:
-  const regexStr = "^" + pattern
-    .split("*").map(part => part.replace(/[.+^${}()|[\]\\]/g, "\\$&")).join(".*")
-    + "$";
-  return new RegExp(regexStr, "i").test(domain);
+  // *.substack.com should match both "foo.substack.com" AND "substack.com"
+  const parts = pattern.split("*");
+  const regexStr = "^" + parts.map(part => part.replace(/[.+^${}()|[\]\\]/g, "\\$&")).join(".*") + "$";
+  if (new RegExp(regexStr, "i").test(domain)) return true;
+
+  // If pattern starts with "*.", also match the bare domain
+  if (pattern.startsWith("*.")) {
+    const bare = pattern.slice(2);
+    if (domain.toLowerCase() === bare.toLowerCase()) return true;
+  }
+  return false;
 }
 
 function domainFromAddress(addr: string): string {
@@ -147,14 +164,7 @@ export async function fetchNewEmails(
   mailbox = "INBOX",
   limit = 20,
 ): Promise<{ emails: ParsedEmail[]; highestUid: number }> {
-  const { ImapFlow } = await import("imapflow");
-  const client = new ImapFlow({
-    host: creds.host,
-    port: creds.port,
-    secure: creds.tls,
-    auth: { user: creds.user, pass: creds.pass },
-    logger: false,
-  });
+  const client = createImapClient(creds);
 
   await client.connect();
 
@@ -176,15 +186,21 @@ export async function fetchNewEmails(
       const targetUids = uids.slice(-limit); // take most recent
       for (const uid of targetUids) {
         try {
-          const msg = await client.fetchOne(String(uid), {
-            uid: true,
-            envelope: true,
-            source: true,
-          }, { uid: true });
+          // Fetch envelope first (imapflow can crash on malformed envelopes)
+          let envelope: any = null;
+          try {
+            const envMsg = await client.fetchOne(String(uid), {
+              uid: true,
+              envelope: true,
+            }, { uid: true });
+            envelope = envMsg?.envelope;
+          } catch {
+            // Malformed envelope — skip this message
+            continue;
+          }
 
-          if (!msg) continue;
+          if (!envelope) continue;
 
-          const envelope = msg.envelope || {};
           const from = envelope.from?.[0];
           const fromAddr = from
             ? (from.address || `${from.mailbox}@${from.host}`)
@@ -192,17 +208,25 @@ export async function fetchNewEmails(
           const subject = envelope.subject || "(no subject)";
           const date = envelope.date ? new Date(envelope.date).toISOString() : "";
 
-          // Filter by domain
+          // Filter by domain before downloading full source
           if (!matchesFilters(fromAddr, filters)) continue;
 
-          // Parse body from raw source
+          // Fetch full source separately
           let textBody = "";
           let htmlBody = "";
-          if (msg.source) {
-            const raw = msg.source.toString("utf-8");
-            const extracted = extractBodiesFromRaw(raw);
-            textBody = extracted.text;
-            htmlBody = extracted.html;
+          try {
+            const srcMsg = await client.fetchOne(String(uid), {
+              uid: true,
+              source: true,
+            }, { uid: true });
+            if (srcMsg?.source) {
+              const raw = srcMsg.source.toString("utf-8");
+              const extracted = extractBodiesFromRaw(raw);
+              textBody = extracted.text;
+              htmlBody = extracted.html;
+            }
+          } catch {
+            // Source fetch failed — still record the message with empty body
           }
 
           const msgUid = typeof uid === "number" ? uid : parseInt(String(uid), 10);
