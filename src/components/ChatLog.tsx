@@ -18,6 +18,7 @@ interface ChatLogProps {
   status: string;
   height: number;
   width: number;
+  scrollOffset: number;
 }
 
 /**
@@ -47,19 +48,23 @@ function estimateStreamingLines(text: string, innerWidth: number): number {
   return total;
 }
 
-export function ChatLog({ messages, streamingText, status, height, width }: ChatLogProps) {
+export function ChatLog({ messages, streamingText, status, height, width, scrollOffset }: ChatLogProps) {
   const innerWidth = width - 4; // account for border + padding
   const innerHeight = height - 2; // account for top + bottom border
+  const scrolled = scrollOffset > 0;
 
-  // Figure out how many messages fit from the bottom
+  // Reserve space for scroll indicator, status, and streaming text
   let linesUsed = 0;
-  if (status) linesUsed += 1;
-  if (streamingText) {
+  if (scrolled) linesUsed += 1; // "↓ more below" indicator
+  if (!scrolled && status) linesUsed += 1;
+  if (!scrolled && streamingText) {
     linesUsed += estimateStreamingLines(streamingText, innerWidth);
   }
 
+  // Skip `scrollOffset` messages from the end, then fill viewport backward
+  const endIndex = messages.length - 1 - scrollOffset;
   const visible: ChatMessage[] = [];
-  for (let i = messages.length - 1; i >= 0 && linesUsed < innerHeight; i--) {
+  for (let i = Math.min(endIndex, messages.length - 1); i >= 0 && linesUsed < innerHeight; i--) {
     const lines = estimateLines(messages[i], innerWidth);
     if (linesUsed + lines > innerHeight && visible.length > 0) break;
     linesUsed += lines;
@@ -87,18 +92,25 @@ export function ChatLog({ messages, streamingText, status, height, width }: Chat
         <Message key={msg.id} role={msg.role} content={msg.content} width={innerWidth} />
       ))}
 
-      {/* Streaming response */}
-      {streamingText ? (
+      {/* Streaming response (only when not scrolled up) */}
+      {!scrolled && streamingText ? (
         <Box width={innerWidth} flexShrink={0}>
           <Text bold color="green">Memex: </Text>
           <Text wrap="wrap">{streamingText}</Text>
         </Box>
       ) : null}
 
-      {/* Status line */}
-      {status ? (
+      {/* Status line (only when not scrolled up) */}
+      {!scrolled && status ? (
         <Box width={innerWidth} flexShrink={0} justifyContent="center">
           <Text dimColor italic>{status}</Text>
+        </Box>
+      ) : null}
+
+      {/* Scroll indicator */}
+      {scrolled ? (
+        <Box width={innerWidth} flexShrink={0} justifyContent="center">
+          <Text dimColor>↓ Shift+Down to scroll back · Shift+Up for more</Text>
         </Box>
       ) : null}
     </Box>

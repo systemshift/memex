@@ -8,6 +8,7 @@ import { Box, useInput, useApp, Text } from "ink";
 import { ChatLog, type ChatMessage } from "./components/ChatLog";
 import { InputBar } from "./components/InputBar";
 import { ChatEngine } from "./chat";
+import { onScroll, offScroll } from "./mouse";
 
 interface AppProps {
   firstRun: boolean;
@@ -43,6 +44,7 @@ export function App({ firstRun }: AppProps) {
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [status, setStatus] = useState("");
+  const [scrollOffset, setScrollOffset] = useState(0);
   const engineRef = useRef<ChatEngine | null>(null);
 
   if (!engineRef.current) {
@@ -52,6 +54,7 @@ export function App({ firstRun }: AppProps) {
 
   const addMessage = useCallback((role: ChatMessage["role"], content: string) => {
     setMessages((prev) => [...prev, { id: ++msgCounter, role, content }]);
+    setScrollOffset(0); // snap to bottom on new message
   }, []);
 
   // Load memory or auto-greet on mount
@@ -123,6 +126,7 @@ export function App({ firstRun }: AppProps) {
       }
 
       addMessage("user", trimmed);
+      setScrollOffset(0);
       setStreaming(true);
       setStatus("Thinking...");
 
@@ -182,9 +186,31 @@ export function App({ firstRun }: AppProps) {
     [streaming, engine, addMessage, exit],
   );
 
-  useInput((input, key) => {
-    if (key.ctrl && input === "c") {
+  // Mouse wheel scroll via filtered stdin (see mouse.ts)
+  const messagesLenRef = useRef(messages.length);
+  messagesLenRef.current = messages.length;
+
+  useEffect(() => {
+    onScroll((dir) => {
+      if (dir === "up") {
+        setScrollOffset((prev) => Math.min(prev + 1, messagesLenRef.current - 1));
+      } else {
+        setScrollOffset((prev) => Math.max(prev - 1, 0));
+      }
+    });
+    return () => offScroll();
+  }, []);
+
+  useInput((_input, key) => {
+    if (key.ctrl && _input === "c") {
       exit();
+    }
+    // Shift+Up/Down: keyboard scroll fallback
+    if (key.shift && key.upArrow) {
+      setScrollOffset((prev) => Math.min(prev + 3, messages.length - 1));
+    }
+    if (key.shift && key.downArrow) {
+      setScrollOffset((prev) => Math.max(prev - 3, 0));
     }
   });
 
@@ -199,6 +225,7 @@ export function App({ firstRun }: AppProps) {
         status={status}
         height={chatHeight}
         width={cols}
+        scrollOffset={scrollOffset}
       />
       <InputBar
         value={input}

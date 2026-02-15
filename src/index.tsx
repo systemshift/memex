@@ -7,6 +7,7 @@ import { render } from "ink";
 import { join } from "path";
 import { homedir } from "os";
 import { App } from "./app";
+import { createFilteredStdin, enableMouseTracking, disableMouseTracking } from "./mouse";
 import { ensureMemexServer, ensureIpfs } from "./binaries";
 import * as emailModule from "./email";
 import { ingestNewEmails } from "./email-ingest";
@@ -231,11 +232,17 @@ async function main() {
   process.stdout.write("\x1b[?1049h"); // enter alt screen
   process.stdout.write("\x1b[H");      // move cursor home
 
+  // Set up mouse tracking with filtered stdin so scroll codes
+  // don't leak into Ink's TextInput
+  const filteredStdin = createFilteredStdin();
+  enableMouseTracking();
+
   const exitAltScreen = () => {
+    disableMouseTracking();
     process.stdout.write("\x1b[?1049l"); // exit alt screen
   };
 
-  const { waitUntilExit } = render(<App firstRun={firstRun} />);
+  const { waitUntilExit } = render(<App firstRun={firstRun} />, { stdin: filteredStdin as any });
   await waitUntilExit();
 
   // Step 11: Cleanup
@@ -244,6 +251,7 @@ async function main() {
 }
 
 main().catch((e) => {
+  disableMouseTracking();
   process.stdout.write("\x1b[?1049l"); // exit alt screen on crash
   console.error(e);
   cleanupAll();
