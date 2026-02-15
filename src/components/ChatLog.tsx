@@ -22,35 +22,52 @@ interface ChatLogProps {
 
 /**
  * Estimate how many terminal rows a message will occupy.
- * Accounts for text wrapping at the given width.
+ * Accounts for newlines in content and text wrapping at the given width.
  */
 function estimateLines(msg: ChatMessage, innerWidth: number): number {
-  const prefix = msg.role === "user" ? 5 : msg.role === "assistant" ? 7 : msg.role === "error" ? 7 : msg.role === "tool" ? 2 : 0;
-  const totalLen = prefix + msg.content.length;
+  const prefixLen = msg.role === "user" ? 5 : msg.role === "assistant" ? 7 : msg.role === "error" ? 7 : msg.role === "tool" ? 2 : 0;
   const effectiveWidth = Math.max(innerWidth, 20);
-  return Math.max(1, Math.ceil(totalLen / effectiveWidth));
+  const lines = msg.content.split("\n");
+  let total = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const len = (i === 0 ? prefixLen : 0) + lines[i].length;
+    total += Math.max(1, Math.ceil(len / effectiveWidth));
+  }
+  return total;
+}
+
+function estimateStreamingLines(text: string, innerWidth: number): number {
+  const effectiveWidth = Math.max(innerWidth, 20);
+  const lines = text.split("\n");
+  let total = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const len = (i === 0 ? 7 : 0) + lines[i].length; // "Memex: " prefix on first line
+    total += Math.max(1, Math.ceil(len / effectiveWidth));
+  }
+  return total;
 }
 
 export function ChatLog({ messages, streamingText, status, height, width }: ChatLogProps) {
   const innerWidth = width - 4; // account for border + padding
+  const innerHeight = height - 2; // account for top + bottom border
 
   // Figure out how many messages fit from the bottom
   let linesUsed = 0;
   if (status) linesUsed += 1;
   if (streamingText) {
-    linesUsed += Math.max(1, Math.ceil((7 + streamingText.length) / Math.max(innerWidth, 20)));
+    linesUsed += estimateStreamingLines(streamingText, innerWidth);
   }
 
   const visible: ChatMessage[] = [];
-  for (let i = messages.length - 1; i >= 0 && linesUsed < height; i--) {
+  for (let i = messages.length - 1; i >= 0 && linesUsed < innerHeight; i--) {
     const lines = estimateLines(messages[i], innerWidth);
-    if (linesUsed + lines > height && visible.length > 0) break;
+    if (linesUsed + lines > innerHeight && visible.length > 0) break;
     linesUsed += lines;
     visible.unshift(messages[i]);
   }
 
   // Fill remaining space
-  const emptyLines = Math.max(0, height - linesUsed);
+  const emptyLines = Math.max(0, innerHeight - linesUsed);
 
   return (
     <Box
