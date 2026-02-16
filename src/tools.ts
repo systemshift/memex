@@ -8,6 +8,7 @@ import * as messages from "./messages";
 import * as ipfs from "./ipfs";
 import * as email from "./email";
 import { ingestNewEmails } from "./email-ingest";
+import { exploreGraph } from "./explore";
 
 function getMemexUrl(): string {
   return process.env.MEMEX_URL ?? "http://localhost:8080";
@@ -172,6 +173,20 @@ export const TOOL_DEFS: any[] = [
     },
     strict: false,
   },
+  // Graph exploration
+  {
+    type: "function",
+    name: "graph_explore",
+    description: "Deep exploration of the knowledge graph using recursive search, reading, and link-following. Use for questions needing more than a simple search — reads content, follows connections, synthesizes across multiple nodes.",
+    parameters: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question to answer by exploring the graph" },
+      },
+      required: ["question"],
+    },
+    strict: false,
+  },
   // Dagit tools
   {
     type: "function",
@@ -318,6 +333,7 @@ export const TOOL_DEFS: any[] = [
 
 export async function executeTool(name: string, args: Record<string, any>): Promise<string> {
   try {
+    if (name === "graph_explore") return await exploreGraph(args.question);
     if (name.startsWith("dagit_")) return await executeDagit(name, args);
     if (name.startsWith("memex_")) return await executeMemex(name, args);
     if (name.startsWith("email_")) return await executeEmail(name, args);

@@ -159,6 +159,8 @@ export function App({ firstRun }: AppProps) {
               setStatus("Checking followed feeds...");
             } else if (label.startsWith("dagit_")) {
               setStatus(`Querying dagit network (${label})...`);
+            } else if (label === "graph_explore") {
+              setStatus("Exploring knowledge graph...");
             } else if (label === "email_check_now") {
               setStatus(`Checking email...`);
             } else if (label === "email_configure") {
