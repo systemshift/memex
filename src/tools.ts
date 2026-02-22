@@ -3,6 +3,9 @@
  */
 
 import { createHash } from "crypto";
+import { readFileSync, readdirSync, mkdirSync, writeFileSync, symlinkSync, existsSync, statSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 import * as identity from "./identity";
 import * as messages from "./messages";
 import * as ipfs from "./ipfs";
@@ -10,8 +13,124 @@ import * as email from "./email";
 import { ingestNewEmails } from "./email-ingest";
 import { exploreGraph } from "./explore";
 
-function getMemexUrl(): string {
-  return process.env.MEMEX_URL ?? "http://localhost:8080";
+export function getMountPath(): string {
+  return process.env.MEMEX_MOUNT ?? join(homedir(), ".memex", "mount");
+}
+
+export function getDataPath(): string {
+  return process.env.MEMEX_DATA ?? join(homedir(), ".memex", "data");
+}
+
+// --- FS helpers for reading nodes/links ---
+
+export interface NodeData {
+  id: string;
+  type: string;
+  meta: Record<string, any>;
+  content: string;
+}
+
+export interface LinkData {
+  source: string;
+  target: string;
+  type: string;
+}
+
+export function fsReadNode(nodeId: string): NodeData | null {
+  const mount = getMountPath();
+  const nodeDir = join(mount, "nodes", nodeId);
+  try {
+    const content = readFileSync(join(nodeDir, "content"), "utf-8");
+    const metaRaw = readFileSync(join(nodeDir, "meta.json"), "utf-8");
+    const type = readFileSync(join(nodeDir, "type"), "utf-8").trim();
+    const meta = JSON.parse(metaRaw);
+    return { id: nodeId, type, meta, content };
+  } catch {
+    return null;
+  }
+}
+
+export function fsReadOutgoingLinks(nodeId: string): LinkData[] {
+  const mount = getMountPath();
+  const linksDir = join(mount, "nodes", nodeId, "links");
+  try {
+    const entries = readdirSync(linksDir);
+    return entries.map(entry => {
+      // entry format: {linkType}:{targetID} — first colon separates type from target
+      const colonIdx = entry.indexOf(":");
+      if (colonIdx === -1) return { source: nodeId, target: entry, type: "related_to" };
+      return {
+        source: nodeId,
+        target: entry.slice(colonIdx + 1),
+        type: entry.slice(0, colonIdx),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function fsReadIncomingLinks(nodeId: string): LinkData[] {
+  const dataPath = getDataPath();
+  const linksFile = join(dataPath, ".mx", "links.jsonl");
+  const incoming: LinkData[] = [];
+  try {
+    const raw = readFileSync(linksFile, "utf-8");
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.target === nodeId) {
+          incoming.push({ source: entry.source, target: entry.target, type: entry.type });
+        }
+      } catch {}
+    }
+  } catch {}
+  return incoming;
+}
+
+export function fsReadAllLinks(nodeId: string): LinkData[] {
+  const outgoing = fsReadOutgoingLinks(nodeId);
+  const incoming = fsReadIncomingLinks(nodeId);
+  // Deduplicate (outgoing links also appear in links.jsonl)
+  const seen = new Set<string>();
+  const all: LinkData[] = [];
+  for (const link of [...outgoing, ...incoming]) {
+    const key = `${link.source}|${link.target}|${link.type}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      all.push(link);
+    }
+  }
+  return all;
+}
+
+export function fsSearchNodes(query: string, limit = 10): string[] {
+  const mount = getMountPath();
+  try {
+    const entries = readdirSync(join(mount, "search", query));
+    return entries.slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+export function fsCreateNode(nodeId: string, content: string, meta: Record<string, any>): void {
+  const mount = getMountPath();
+  const nodeDir = join(mount, "nodes", nodeId);
+  mkdirSync(nodeDir, { recursive: true });
+  writeFileSync(join(nodeDir, "content"), content);
+  writeFileSync(join(nodeDir, "meta.json"), JSON.stringify(meta, null, 2) + "\n");
+}
+
+export function fsCreateLink(source: string, target: string, linkType: string): void {
+  const mount = getMountPath();
+  const linkPath = join(mount, "nodes", source, "links", `${linkType}:${target}`);
+  try {
+    symlinkSync(`../../${target}`, linkPath);
+  } catch (e: any) {
+    if (e.code !== "EEXIST") throw e;
+  }
 }
 
 // --- Petname generator (deterministic, matches dagit/feed.py) ---
@@ -335,7 +454,7 @@ export async function executeTool(name: string, args: Record<string, any>): Prom
   try {
     if (name === "graph_explore") return await exploreGraph(args.question);
     if (name.startsWith("dagit_")) return await executeDagit(name, args);
-    if (name.startsWith("memex_")) return await executeMemex(name, args);
+    if (name.startsWith("memex_")) return executeMemex(name, args);
     if (name.startsWith("email_")) return await executeEmail(name, args);
     return `Unknown tool: ${name}`;
   } catch (e: any) {
@@ -343,35 +462,28 @@ export async function executeTool(name: string, args: Record<string, any>): Prom
   }
 }
 
-async function executeMemex(name: string, args: Record<string, any>): Promise<string> {
-  const url = getMemexUrl();
+function executeMemex(name: string, args: Record<string, any>): string {
+  const mount = getMountPath();
 
   switch (name) {
     case "memex_search": {
-      const params = new URLSearchParams({ q: args.query, limit: String(args.limit ?? 10) });
-      const resp = await fetch(`${url}/api/query/search?${params}`, { signal: AbortSignal.timeout(10000) });
-      if (resp.status !== 200) return `Search failed: ${resp.status}`;
-      const data = await resp.json() as any;
-      const nodes = data.nodes ?? [];
-      if (!nodes.length) return `No results for '${args.query}'`;
-      const lines = [`Found ${nodes.length} results:`];
-      for (const n of nodes) {
-        const nid = n.ID ?? "";
-        const ntype = n.Type ?? "";
-        const meta = n.Meta ?? {};
-        const name = meta.name ?? meta.title ?? nid;
-        lines.push(`  [${ntype}] ${name} (id: ${nid})`);
+      const nodeIds = fsSearchNodes(args.query, args.limit ?? 10);
+      if (!nodeIds.length) return `No results for '${args.query}'`;
+      const lines = [`Found ${nodeIds.length} results:`];
+      for (const nid of nodeIds) {
+        const node = fsReadNode(nid);
+        if (!node) continue;
+        const label = node.meta.name ?? node.meta.title ?? nid;
+        lines.push(`  [${node.type}] ${label} (id: ${nid})`);
       }
       return lines.join("\n");
     }
 
     case "memex_get_node": {
-      const resp = await fetch(`${url}/api/nodes/${args.id}`, { signal: AbortSignal.timeout(10000) });
-      if (resp.status !== 200) return `Node not found: ${args.id}`;
-      const n = await resp.json() as any;
-      const lines = [`Node: ${args.id}`, `  Type: ${n.Type ?? ""}`];
-      const meta = n.Meta ?? {};
-      for (const [k, v] of Object.entries(meta)) {
+      const node = fsReadNode(args.id);
+      if (!node) return `Node not found: ${args.id}`;
+      const lines = [`Node: ${args.id}`, `  Type: ${node.type}`];
+      for (const [k, v] of Object.entries(node.meta)) {
         if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
           lines.push(`  ${k}: ${v}`);
         }
@@ -380,67 +492,73 @@ async function executeMemex(name: string, args: Record<string, any>): Promise<st
     }
 
     case "memex_get_links": {
-      const resp = await fetch(`${url}/api/nodes/${args.id}/links`, { signal: AbortSignal.timeout(10000) });
-      if (resp.status !== 200) return `No links for: ${args.id}`;
-      const data = await resp.json() as any;
-      const links: any[] = Array.isArray(data) ? data : (data.links ?? []);
+      const links = fsReadAllLinks(args.id);
       if (!links.length) return `No links for ${args.id}`;
 
-      const seen = new Set<string>();
-      const unique: any[] = [];
-      for (const link of links) {
-        const key = `${link.Source}|${link.Target}|${link.Type}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          unique.push(link);
-        }
-      }
-
-      const lines = [`Links for ${args.id} (${unique.length}):`];
-      for (const link of unique.slice(0, 20)) {
-        if (link.Source === args.id) {
-          lines.push(`  --[${link.Type}]--> ${link.Target}`);
+      const lines = [`Links for ${args.id} (${links.length}):`];
+      for (const link of links.slice(0, 20)) {
+        if (link.source === args.id) {
+          lines.push(`  --[${link.type}]--> ${link.target}`);
         } else {
-          lines.push(`  <--[${link.Type}]-- ${link.Source}`);
+          lines.push(`  <--[${link.type}]-- ${link.source}`);
         }
       }
-      if (unique.length > 20) lines.push(`  ... and ${unique.length - 20} more`);
+      if (links.length > 20) lines.push(`  ... and ${links.length - 20} more`);
       return lines.join("\n");
     }
 
     case "memex_traverse": {
-      const params = new URLSearchParams({ start: args.start, depth: String(args.depth ?? 2) });
-      const resp = await fetch(`${url}/api/query/traverse?${params}`, { signal: AbortSignal.timeout(10000) });
-      if (resp.status !== 200) return `Traverse failed from: ${args.start}`;
-      const data = await resp.json() as any;
-      const nodes = data.nodes ?? [];
-      const edges = data.edges ?? [];
-      if (!nodes.length) return `No nodes from ${args.start}`;
+      const maxDepth = args.depth ?? 2;
+      const visited = new Set<string>();
+      const edges: LinkData[] = [];
+      const queue: Array<{ id: string; depth: number }> = [{ id: args.start, depth: 0 }];
 
-      const lines = [`Traversal from ${args.start}: ${nodes.length} nodes, ${edges.length} edges`];
-      for (const n of nodes.slice(0, 10)) {
-        const meta = n.Meta ?? {};
-        const label = meta.name ?? meta.title ?? n.ID;
-        lines.push(`  [${n.Type}] ${label}`);
+      while (queue.length > 0) {
+        const { id, depth } = queue.shift()!;
+        if (visited.has(id)) continue;
+        visited.add(id);
+
+        if (depth < maxDepth) {
+          const links = fsReadOutgoingLinks(id);
+          for (const link of links) {
+            edges.push(link);
+            if (!visited.has(link.target)) {
+              queue.push({ id: link.target, depth: depth + 1 });
+            }
+          }
+        }
       }
-      if (nodes.length > 10) lines.push(`  ... and ${nodes.length - 10} more`);
+
+      if (visited.size === 0) return `No nodes from ${args.start}`;
+
+      const lines = [`Traversal from ${args.start}: ${visited.size} nodes, ${edges.length} edges`];
+      let count = 0;
+      for (const nid of visited) {
+        if (count >= 10) break;
+        const node = fsReadNode(nid);
+        if (!node) continue;
+        const label = node.meta.name ?? node.meta.title ?? nid;
+        lines.push(`  [${node.type}] ${label}`);
+        count++;
+      }
+      if (visited.size > 10) lines.push(`  ... and ${visited.size - 10} more`);
       return lines.join("\n");
     }
 
     case "memex_filter": {
-      const params = new URLSearchParams({ type: args.type, limit: String(args.limit ?? 20) });
-      const resp = await fetch(`${url}/api/query/filter?${params}`, { signal: AbortSignal.timeout(10000) });
-      if (resp.status !== 200) return `Filter failed for type: ${args.type}`;
-      const data = await resp.json() as any;
-      const nodes = data.nodes ?? [];
-      if (!nodes.length) return `No ${args.type} nodes found`;
-
-      const lines = [`${args.type} nodes (${nodes.length}):`];
-      for (const n of nodes) {
-        const nid = typeof n === "string" ? n : (n.ID ?? "");
-        lines.push(`  ${nid}`);
+      const limit = args.limit ?? 20;
+      try {
+        const entries = readdirSync(join(mount, "types", args.type));
+        if (!entries.length) return `No ${args.type} nodes found`;
+        const limited = entries.slice(0, limit);
+        const lines = [`${args.type} nodes (${entries.length}):`];
+        for (const nid of limited) {
+          lines.push(`  ${nid}`);
+        }
+        return lines.join("\n");
+      } catch {
+        return `No ${args.type} nodes found`;
       }
-      return lines.join("\n");
     }
 
     case "memex_create_node": {
@@ -453,26 +571,11 @@ async function executeMemex(name: string, args: Record<string, any>): Promise<st
       const shortHash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
       const nodeId = `${prefix}:${shortHash}`;
 
-      const payload: any = {
-        id: nodeId,
-        type: ntype,
-        meta: { content },
-      };
-      if (title) payload.meta.title = title;
+      const meta: Record<string, any> = { content };
+      if (title) meta.title = title;
 
-      const resp = await fetch(`${url}/api/nodes`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10000),
-      });
-
-      if (resp.status !== 200 && resp.status !== 201) {
-        return `Create failed: ${resp.status} - ${await resp.text()}`;
-      }
-      const data = await resp.json() as any;
-      const finalId = data.id ?? data.ID ?? nodeId;
-      return `Created ${ntype} node: ${finalId}`;
+      fsCreateNode(nodeId, content, meta);
+      return `Created ${ntype} node: ${nodeId}`;
     }
 
     case "memex_ingest": {
@@ -480,42 +583,44 @@ async function executeMemex(name: string, args: Record<string, any>): Promise<st
       const format = args.format ?? "text";
       if (!content) return "Error: content is required";
 
-      const resp = await fetch(`${url}/api/ingest`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, format }),
-        signal: AbortSignal.timeout(10000),
-      });
+      const hash = createHash("sha256").update(content).digest("hex");
+      const nodeId = `sha256:${hash}`;
 
-      if (resp.status !== 200) return `Ingest failed: ${resp.status} - ${await resp.text()}`;
-      const data = await resp.json() as any;
-      return `Ingested as ${data.source_id ?? "unknown"}`;
+      // Dedup: check if already exists
+      const nodeDir = join(mount, "nodes", nodeId);
+      try {
+        statSync(nodeDir);
+        return `Already ingested as ${nodeId}`;
+      } catch {}
+
+      const meta: Record<string, any> = {
+        format,
+        ingested_at: new Date().toISOString(),
+      };
+
+      fsCreateNode(nodeId, content, meta);
+      return `Ingested as ${nodeId}`;
     }
 
     case "memex_update_node": {
       if (!args.id) return "Error: id is required";
-      const resp = await fetch(`${url}/api/nodes/${args.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ meta: args.meta ?? {} }),
-        signal: AbortSignal.timeout(10000),
-      });
-      if (resp.status !== 200) return `Update failed: ${resp.status} - ${await resp.text()}`;
-      return `Updated node: ${args.id}`;
+      const nodeDir = join(mount, "nodes", args.id);
+      try {
+        const existingRaw = readFileSync(join(nodeDir, "meta.json"), "utf-8");
+        const existing = JSON.parse(existingRaw);
+        const merged = { ...existing, ...(args.meta ?? {}) };
+        writeFileSync(join(nodeDir, "meta.json"), JSON.stringify(merged, null, 2) + "\n");
+        return `Updated node: ${args.id}`;
+      } catch {
+        return `Node not found: ${args.id}`;
+      }
     }
 
     case "memex_create_link": {
       if (!args.source || !args.target) return "Error: source and target are required";
-      const resp = await fetch(`${url}/api/links`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: args.source, target: args.target, type: args.type ?? "related_to" }),
-        signal: AbortSignal.timeout(10000),
-      });
-      if (resp.status !== 200 && resp.status !== 201) {
-        return `Link failed: ${resp.status} - ${await resp.text()}`;
-      }
-      return `Created link: ${args.source} --[${args.type ?? "related_to"}]--> ${args.target}`;
+      const linkType = args.type ?? "related_to";
+      fsCreateLink(args.source, args.target, linkType);
+      return `Created link: ${args.source} --[${linkType}]--> ${args.target}`;
     }
 
     default:
@@ -586,17 +691,9 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
 
       // Create Person node in graph so memex_search can find them by name
       const nodeId = `person:${createHash("sha256").update(args.did).digest("hex").slice(0, 8)}`;
-      const url = getMemexUrl();
-      await fetch(`${url}/api/nodes`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: nodeId,
-          type: "Person",
-          meta: { name: alias, did: args.did },
-        }),
-        signal: AbortSignal.timeout(5000),
-      }).catch(() => {});
+      try {
+        fsCreateNode(nodeId, "", { name: alias, did: args.did });
+      } catch {}
 
       return result;
     }
@@ -730,11 +827,11 @@ async function executeEmail(name: string, args: Record<string, any>): Promise<st
 
 const CREDENTIAL_PATTERN = /password|app.?password|imap.*pass/i;
 
-export async function ingestConversationTurn(
+export function ingestConversationTurn(
   userMsg: string,
   assistantMsg: string,
   toolCalls?: string[],
-): Promise<string | null> {
+): string | null {
   // Skip ingestion when email_configure was called (prevents passwords from entering the graph)
   if (toolCalls?.some(tc => tc === "email_configure")) return null;
   // Also skip if user message looks like it contains credentials
@@ -750,62 +847,61 @@ export async function ingestConversationTurn(
   const content = parts.join("\n");
 
   try {
-    const resp = await fetch(`${getMemexUrl()}/api/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, format: "conversation" }),
-      signal: AbortSignal.timeout(5000),
+    const mount = getMountPath();
+    const hash = createHash("sha256").update(content).digest("hex");
+    const nodeId = `sha256:${hash}`;
+
+    // Dedup
+    const nodeDir = join(mount, "nodes", nodeId);
+    try {
+      statSync(nodeDir);
+      return nodeId; // already exists
+    } catch {}
+
+    fsCreateNode(nodeId, content, {
+      format: "conversation",
+      ingested_at: new Date().toISOString(),
     });
-    if (resp.status === 200) {
-      const data = await resp.json() as any;
-      return data.source_id ?? null;
-    }
-  } catch {}
-  return null;
+    return nodeId;
+  } catch {
+    return null;
+  }
 }
 
-export async function loadRecentConversations(limit = 20): Promise<Array<{ role: string; content: string }>> {
+export function loadRecentConversations(limit = 20): Array<{ role: string; content: string }> {
   try {
-    const params = new URLSearchParams({ type: "Source", limit: String(limit) });
-    const resp = await fetch(`${getMemexUrl()}/api/query/filter?${params}`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (resp.status !== 200) return [];
-
-    const data = await resp.json() as any;
-    const nodes: any[] = Array.isArray(data) ? data : (data.nodes ?? []);
+    const mount = getMountPath();
+    let sourceIds: string[];
+    try {
+      sourceIds = readdirSync(join(mount, "types", "Source"));
+    } catch {
+      return [];
+    }
 
     const conversations: Array<{ id: string; content: string; ingested_at: string }> = [];
 
-    for (const node of nodes) {
-      if (typeof node !== "object") continue;
-      const meta = node.Meta ?? {};
-      if (meta.format !== "conversation") continue;
-      const raw = node.Content ?? "";
-      if (!raw) continue;
-
-      let content: string;
-      try {
-        // Content comes back as base64 from Go API ([]byte -> JSON)
-        content = Buffer.from(raw, "base64").toString("utf-8");
-      } catch {
-        content = typeof raw === "string" ? raw : "";
-      }
-      if (!content) continue;
+    for (const nid of sourceIds) {
+      const node = fsReadNode(nid);
+      if (!node) continue;
+      if (node.meta.format !== "conversation") continue;
+      if (!node.content) continue;
 
       conversations.push({
-        id: node.ID ?? "",
-        content,
-        ingested_at: meta.ingested_at ?? "",
+        id: nid,
+        content: node.content,
+        ingested_at: node.meta.ingested_at ?? "",
       });
     }
 
     // Sort oldest first
     conversations.sort((a, b) => a.ingested_at.localeCompare(b.ingested_at));
 
+    // Take most recent
+    const recent = conversations.slice(-limit);
+
     // Parse back into message pairs
     const msgs: Array<{ role: string; content: string }> = [];
-    for (const conv of conversations) {
+    for (const conv of recent) {
       let userPart = "";
       let assistantPart = "";
       let inAssistant = false;

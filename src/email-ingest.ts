@@ -4,11 +4,16 @@
  */
 
 import { createHash } from "crypto";
+import { readFileSync, readdirSync, statSync } from "fs";
+import { join } from "path";
 import * as email from "./email";
-
-function getMemexUrl(): string {
-  return process.env.MEMEX_URL ?? "http://localhost:8080";
-}
+import {
+  getMountPath,
+  fsReadNode,
+  fsSearchNodes,
+  fsCreateNode,
+  fsCreateLink,
+} from "./tools";
 
 // --- HTML stripping ---
 
@@ -31,19 +36,23 @@ export function stripHtml(html: string): string {
     .trim();
 }
 
-// --- Fetch lenses from graph ---
+// --- Fetch lenses from FUSE mount ---
 
 async function loadLenses(): Promise<Array<{ id: string; name: string; description: string }>> {
+  const mount = getMountPath();
   try {
-    const resp = await fetch(`${getMemexUrl()}/api/lenses`, { signal: AbortSignal.timeout(5000) });
-    if (resp.status !== 200) return [];
-    const data = await resp.json() as any;
-    const lenses = Array.isArray(data) ? data : (data.lenses ?? []);
-    return lenses.map((l: any) => ({
-      id: l.ID ?? l.id ?? "",
-      name: l.Meta?.name ?? l.name ?? "",
-      description: l.Meta?.description ?? l.description ?? "",
-    }));
+    const lensIds = readdirSync(join(mount, "lenses"));
+    const lenses: Array<{ id: string; name: string; description: string }> = [];
+    for (const lid of lensIds) {
+      const node = fsReadNode(lid);
+      if (!node) continue;
+      lenses.push({
+        id: lid,
+        name: node.meta.name ?? "",
+        description: node.meta.description ?? "",
+      });
+    }
+    return lenses;
   } catch {
     return [];
   }
@@ -51,24 +60,18 @@ async function loadLenses(): Promise<Array<{ id: string; name: string; descripti
 
 // --- Fetch graph context via search ---
 
-async function loadGraphContext(subject: string, from: string): Promise<string> {
+function loadGraphContext(subject: string, from: string): string {
   try {
-    // Search for related content to give LLM context
     const queries = [subject.slice(0, 60), from.split("@")[0]].filter(Boolean);
     const results: string[] = [];
 
     for (const q of queries) {
-      const params = new URLSearchParams({ q, limit: "5" });
-      const resp = await fetch(`${getMemexUrl()}/api/query/search?${params}`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      if (resp.status !== 200) continue;
-      const data = await resp.json() as any;
-      const nodes = data.nodes ?? [];
-      for (const n of nodes) {
-        const meta = n.Meta ?? {};
-        const label = meta.name ?? meta.title ?? n.ID;
-        results.push(`[${n.Type}] ${label}`);
+      const nodeIds = fsSearchNodes(q, 5);
+      for (const nid of nodeIds) {
+        const node = fsReadNode(nid);
+        if (!node) continue;
+        const label = node.meta.name ?? node.meta.title ?? nid;
+        results.push(`[${node.type}] ${label}`);
       }
     }
 
@@ -82,23 +85,30 @@ async function loadGraphContext(subject: string, from: string): Promise<string> 
 
 // --- Ingest raw email as Source node ---
 
-async function ingestRawEmail(parsed: email.ParsedEmail): Promise<string | null> {
+function ingestRawEmail(parsed: email.ParsedEmail): string | null {
   const body = parsed.textBody || stripHtml(parsed.htmlBody);
   const content = `From: ${parsed.from}\nSubject: ${parsed.subject}\nDate: ${parsed.date}\n\n${body}`;
 
   try {
-    const resp = await fetch(`${getMemexUrl()}/api/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, format: "email" }),
-      signal: AbortSignal.timeout(10000),
+    const mount = getMountPath();
+    const hash = createHash("sha256").update(content).digest("hex");
+    const nodeId = `sha256:${hash}`;
+
+    // Dedup
+    const nodeDir = join(mount, "nodes", nodeId);
+    try {
+      statSync(nodeDir);
+      return nodeId; // already exists
+    } catch {}
+
+    fsCreateNode(nodeId, content, {
+      format: "email",
+      ingested_at: new Date().toISOString(),
     });
-    if (resp.status === 200) {
-      const data = await resp.json() as any;
-      return data.source_id ?? null;
-    }
-  } catch {}
-  return null;
+    return nodeId;
+  } catch {
+    return null;
+  }
 }
 
 // --- LLM Extraction ---
@@ -197,51 +207,28 @@ Be selective: 2-5 extractions for a typical newsletter is ideal.`;
 
 // --- Create extraction nodes + links ---
 
-async function createExtractionNode(
+function createExtractionNode(
   extraction: Extraction,
   sourceId: string,
-): Promise<string | null> {
-  const url = getMemexUrl();
+): string | null {
   const prefix = extraction.type.toLowerCase();
   const hashInput = `${extraction.title}${extraction.content}${Date.now()}`;
   const shortHash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
   const nodeId = `${prefix}:${shortHash}`;
 
   try {
-    // Create the node
-    const resp = await fetch(`${url}/api/nodes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: nodeId,
-        type: extraction.type,
-        meta: {
-          title: extraction.title,
-          content: extraction.content,
-          extracted_from_email: true,
-        },
-      }),
-      signal: AbortSignal.timeout(10000),
+    fsCreateNode(nodeId, extraction.content, {
+      title: extraction.title,
+      content: extraction.content,
+      extracted_from_email: true,
     });
-
-    if (resp.status !== 200 && resp.status !== 201) return null;
 
     // Link to source
-    await fetch(`${url}/api/links`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: nodeId, target: sourceId, type: "EXTRACTED_FROM" }),
-      signal: AbortSignal.timeout(5000),
-    });
+    fsCreateLink(nodeId, sourceId, "EXTRACTED_FROM");
 
     // Link to lens if applicable
     if (extraction.lens) {
-      await fetch(`${url}/api/links`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: nodeId, target: extraction.lens, type: "INTERPRETED_THROUGH" }),
-        signal: AbortSignal.timeout(5000),
-      });
+      fsCreateLink(nodeId, extraction.lens, "INTERPRETED_THROUGH");
     }
 
     return nodeId;
@@ -303,7 +290,7 @@ export async function ingestNewEmails(
 
   for (const parsed of emails) {
     // Ingest raw email as Source node
-    const sourceId = await ingestRawEmail(parsed);
+    const sourceId = ingestRawEmail(parsed);
     if (!sourceId) {
       progress.emailsProcessed++;
       continue;
@@ -320,7 +307,7 @@ export async function ingestNewEmails(
     onProgress?.(progress);
 
     // Load context relevant to this email
-    const graphContext = await loadGraphContext(parsed.subject, parsed.from);
+    const graphContext = loadGraphContext(parsed.subject, parsed.from);
 
     // Extract with LLM
     const extractions = await extractWithLlm(
@@ -333,7 +320,7 @@ export async function ingestNewEmails(
 
     // Create nodes + links
     for (const extraction of extractions) {
-      const nodeId = await createExtractionNode(extraction, sourceId);
+      const nodeId = createExtractionNode(extraction, sourceId);
       if (nodeId) progress.extractionsCreated++;
     }
 

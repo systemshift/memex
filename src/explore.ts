@@ -2,24 +2,15 @@
  * RLM-style graph exploration: sub-LLM recursively searches, reads, follows links, and synthesizes.
  */
 
-function getMemexUrl(): string {
-  return process.env.MEMEX_URL ?? "http://localhost:8080";
-}
+import {
+  fsReadNode,
+  fsSearchNodes,
+  fsReadAllLinks,
+  type NodeData,
+  type LinkData,
+} from "./tools";
 
 // --- Types ---
-
-interface NodeData {
-  id: string;
-  type: string;
-  meta: Record<string, any>;
-  content: string;
-}
-
-interface LinkData {
-  source: string;
-  target: string;
-  type: string;
-}
 
 interface Finding {
   nodeId: string;
@@ -27,79 +18,16 @@ interface Finding {
   summary: string;
 }
 
-// --- Graph API helpers ---
+// --- Graph FS helpers ---
 
-async function apiSearch(query: string, limit = 10): Promise<NodeData[]> {
-  const url = getMemexUrl();
-  const params = new URLSearchParams({ q: query, limit: String(limit) });
-  try {
-    const resp = await fetch(`${url}/api/query/search?${params}`, { signal: AbortSignal.timeout(10000) });
-    if (resp.status !== 200) return [];
-    const data = await resp.json() as any;
-    const nodes = data.nodes ?? [];
-    return nodes.map((n: any) => {
-      const raw = n.Content ?? "";
-      let content = "";
-      if (raw) {
-        try {
-          content = Buffer.from(raw, "base64").toString("utf-8");
-        } catch {
-          content = typeof raw === "string" ? raw : "";
-        }
-      }
-      return {
-        id: n.ID ?? "",
-        type: n.Type ?? "",
-        meta: n.Meta ?? {},
-        content,
-      };
-    });
-  } catch {
-    return [];
+function searchGraph(query: string, limit = 10): NodeData[] {
+  const nodeIds = fsSearchNodes(query, limit);
+  const results: NodeData[] = [];
+  for (const nid of nodeIds) {
+    const node = fsReadNode(nid);
+    if (node) results.push(node);
   }
-}
-
-async function apiGetNode(id: string): Promise<NodeData | null> {
-  const url = getMemexUrl();
-  try {
-    const resp = await fetch(`${url}/api/nodes/${id}`, { signal: AbortSignal.timeout(10000) });
-    if (resp.status !== 200) return null;
-    const n = await resp.json() as any;
-    const raw = n.Content ?? "";
-    let content = "";
-    if (raw) {
-      try {
-        content = Buffer.from(raw, "base64").toString("utf-8");
-      } catch {
-        content = typeof raw === "string" ? raw : "";
-      }
-    }
-    return {
-      id: n.ID ?? id,
-      type: n.Type ?? "",
-      meta: n.Meta ?? {},
-      content,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function apiGetLinks(id: string): Promise<LinkData[]> {
-  const url = getMemexUrl();
-  try {
-    const resp = await fetch(`${url}/api/nodes/${id}/links`, { signal: AbortSignal.timeout(10000) });
-    if (resp.status !== 200) return [];
-    const data = await resp.json() as any;
-    const links: any[] = Array.isArray(data) ? data : (data.links ?? []);
-    return links.map((l: any) => ({
-      source: l.Source ?? l.source ?? "",
-      target: l.Target ?? l.target ?? "",
-      type: l.Type ?? l.type ?? "",
-    }));
-  } catch {
-    return [];
-  }
+  return results;
 }
 
 // --- Sub-LLM tool definitions (Chat Completions format) ---
@@ -181,17 +109,17 @@ const SUB_LLM_TOOLS = [
 
 // --- Sub-LLM tool execution ---
 
-async function executeSubTool(
+function executeSubTool(
   name: string,
   args: Record<string, any>,
   budget: { readsLeft: number },
   findings: Finding[],
-): Promise<{ result: string; stop: boolean }> {
+): { result: string; stop: boolean } {
   switch (name) {
     case "read_node": {
       if (budget.readsLeft <= 0) return { result: "Budget exhausted — no reads remaining.", stop: false };
       budget.readsLeft--;
-      const node = await apiGetNode(args.id);
+      const node = fsReadNode(args.id);
       if (!node) return { result: `Node not found: ${args.id}`, stop: false };
       const content = node.content.length > 2000 ? node.content.slice(0, 2000) + "\n[...truncated]" : node.content;
       const metaLines = Object.entries(node.meta)
@@ -205,7 +133,7 @@ async function executeSubTool(
     }
 
     case "search_graph": {
-      const results = await apiSearch(args.query, 10);
+      const results = searchGraph(args.query, 10);
       if (!results.length) return { result: `No results for "${args.query}"`, stop: false };
       const lines = results.map(n => {
         const label = n.meta.name ?? n.meta.title ?? n.id;
@@ -216,7 +144,7 @@ async function executeSubTool(
     }
 
     case "follow_links": {
-      const links = await apiGetLinks(args.id);
+      const links = fsReadAllLinks(args.id);
       if (!links.length) return { result: `No links for ${args.id}`, stop: false };
       const lines = links.slice(0, 20).map(l => {
         if (l.source === args.id) return `  --[${l.type}]--> ${l.target}`;
@@ -261,7 +189,7 @@ export async function exploreGraph(question: string): Promise<string> {
   const MAX_LLM_CALLS = 8;
 
   // Phase 1: Initial search
-  const initialResults = await apiSearch(question, 10);
+  const initialResults = searchGraph(question, 10);
   if (!initialResults.length) return "No relevant nodes found in the knowledge graph.";
 
   const OpenAI = (await import("openai")).default;
@@ -331,7 +259,7 @@ Budget: ${MAX_READS} reads, ${MAX_LLM_CALLS} LLM calls remaining`,
         args = JSON.parse(tc.function.arguments);
       } catch {}
 
-      const { result, stop } = await executeSubTool(tc.function.name, args, budget, findings);
+      const { result, stop } = executeSubTool(tc.function.name, args, budget, findings);
 
       messages.push({
         role: "tool",

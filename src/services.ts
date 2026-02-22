@@ -2,7 +2,7 @@
  * Subprocess management, health checks, and cleanup.
  */
 
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, readdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import type { Subprocess } from "bun";
@@ -92,59 +92,23 @@ export async function ensureDagitIdentity(): Promise<string> {
   }
 }
 
-export async function startMemexServer(
-  serverBin: string,
-  port: number,
-  backend: string,
-  dbPath: string,
-): Promise<Subprocess> {
-  const dir = dbPath.substring(0, dbPath.lastIndexOf("/"));
-  mkdirSync(dir, { recursive: true });
-
-  log(`Starting memex-server on port ${port} (${backend} backend)...`);
-
-  const env = {
-    ...process.env,
-    PORT: String(port),
-    MEMEX_BACKEND: backend,
-    SQLITE_PATH: dbPath,
-  };
-
-  const proc = Bun.spawn([serverBin], {
-    env,
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  procs.push(proc);
-  return proc;
-}
-
-export async function waitForServer(url: string, timeout = 10000): Promise<boolean> {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    try {
-      const resp = await fetch(`${url}/health`, {
-        signal: AbortSignal.timeout(500),
-      });
-      if (resp.status === 200) return true;
-    } catch {}
-    await Bun.sleep(200);
-  }
-  return false;
-}
-
-export async function isGraphEmpty(serverUrl: string): Promise<boolean> {
+export function isMounted(mountPath: string): boolean {
   try {
-    const resp = await fetch(`${serverUrl}/api/nodes?limit=1`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (resp.status === 200) {
-      const data = await resp.json() as any;
-      const nodes = Array.isArray(data) ? data : (data.nodes ?? []);
-      return nodes.length === 0;
-    }
-  } catch {}
-  return true;
+    const entries = readdirSync(mountPath);
+    // A live memex-fs mount has nodes/, types/, search/ at minimum
+    return entries.includes("nodes") && entries.includes("types") && entries.includes("search");
+  } catch {
+    return false;
+  }
+}
+
+export function isGraphEmpty(mountPath: string): boolean {
+  try {
+    const entries = readdirSync(join(mountPath, "nodes"));
+    return entries.length === 0;
+  } catch {
+    return true;
+  }
 }
 
 export function cleanupAll(): void {

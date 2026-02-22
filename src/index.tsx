@@ -8,7 +8,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { App } from "./app";
 import { createFilteredStdin, enableMouseTracking, disableMouseTracking } from "./mouse";
-import { ensureMemexServer, ensureIpfs } from "./binaries";
+import { ensureIpfs } from "./binaries";
 import * as emailModule from "./email";
 import { ingestNewEmails } from "./email-ingest";
 import {
@@ -17,8 +17,7 @@ import {
   startIpfsDaemon,
   waitForIpfs,
   ensureDagitIdentity,
-  startMemexServer,
-  waitForServer,
+  isMounted,
   isGraphEmpty,
   cleanupAll,
   registerCleanup,
@@ -30,27 +29,19 @@ import {
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts = {
-    serverOnly: false,
-    port: parseInt(process.env.PORT ?? "8080", 10),
-    backend: process.env.MEMEX_BACKEND ?? "sqlite",
-    dbPath: process.env.SQLITE_PATH ?? join(homedir(), ".memex", "memex.db"),
+    mount: process.env.MEMEX_MOUNT ?? join(homedir(), ".memex", "mount"),
+    data: process.env.MEMEX_DATA ?? join(homedir(), ".memex", "data"),
     skipIpfs: false,
     skipDownload: false,
   };
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case "--server-only":
-        opts.serverOnly = true;
+      case "--mount":
+        opts.mount = args[++i];
         break;
-      case "--port":
-        opts.port = parseInt(args[++i], 10);
-        break;
-      case "--backend":
-        opts.backend = args[++i];
-        break;
-      case "--db-path":
-        opts.dbPath = args[++i];
+      case "--data":
+        opts.data = args[++i];
         break;
       case "--skip-ipfs":
         opts.skipIpfs = true;
@@ -63,10 +54,8 @@ function parseArgs() {
         console.log(`Usage: memex [options]
 
 Options:
-  --server-only    Start server without TUI
-  --port <n>       Server port (default: 8080)
-  --backend <b>    Storage backend: sqlite or neo4j (default: sqlite)
-  --db-path <p>    SQLite database path
+  --mount <path>   FUSE mountpoint (default: ~/.memex/mount)
+  --data <path>    Data directory (default: ~/.memex/data)
   --skip-ipfs      Skip IPFS daemon setup
   --skip-download  Skip automatic binary downloads
   -h, --help       Show this help`);
@@ -90,26 +79,17 @@ async function main() {
     process.exit(1);
   }
 
-  // Step 2: Ensure memex-server binary
-  let serverBin: string;
-  if (opts.skipDownload) {
-    const result = Bun.spawnSync(["which", "memex-server"], { stdout: "pipe" });
-    const fromPath = result.exitCode === 0 ? new TextDecoder().decode(result.stdout).trim() : null;
-    serverBin = process.env.MEMEX_SERVER ?? fromPath ?? "";
-    if (!serverBin) {
-      const cached = join(homedir(), ".memex", "bin", "memex-server");
-      const { existsSync } = await import("fs");
-      if (existsSync(cached)) {
-        serverBin = cached;
-      } else {
-        error("memex-server not found (--skip-download active)");
-        process.exit(1);
-      }
-    }
-  } else {
-    serverBin = await ensureMemexServer();
+  // Step 2: Check FUSE mountpoint
+  if (!isMounted(opts.mount)) {
+    error(`memex-fs is not mounted at ${opts.mount}`);
+    error("Start it with: memex-fs -data " + opts.data + " -mount " + opts.mount);
+    process.exit(1);
   }
-  log(`memex-server: ${serverBin}`);
+  log(`Mount: ${opts.mount}`);
+
+  // Set env vars for tools
+  process.env.MEMEX_MOUNT = opts.mount;
+  process.env.MEMEX_DATA = opts.data;
 
   // Step 3: Ensure IPFS binary
   let ipfsBin: string | null = null;
@@ -167,21 +147,6 @@ async function main() {
     }).catch(() => {});
   }
 
-  // Step 7: Start memex-server
-  await startMemexServer(serverBin, opts.port, opts.backend, opts.dbPath);
-
-  // Step 8: Wait for server
-  const serverUrl = `http://localhost:${opts.port}`;
-  if (!(await waitForServer(serverUrl))) {
-    error("Server failed to start");
-    cleanupAll();
-    process.exit(1);
-  }
-  log("Server ready");
-
-  // Set MEMEX_URL for tools
-  process.env.MEMEX_URL = serverUrl;
-
   // Auto-check email on startup (fire-and-forget, non-blocking)
   if (emailModule.isConfigured()) {
     log("Checking email...");
@@ -212,20 +177,13 @@ async function main() {
     }
   }
 
-  if (opts.serverOnly) {
-    log("Server running. Press Ctrl+C to stop.");
-    // Keep process alive
-    await new Promise(() => {});
-    return;
-  }
-
-  // Step 9: Check if graph is empty
-  const firstRun = await isGraphEmpty(serverUrl);
+  // Step 7: Check if graph is empty
+  const firstRun = isGraphEmpty(opts.mount);
   if (firstRun) {
     log("Empty graph detected — starting onboarding");
   }
 
-  // Step 10: Launch TUI
+  // Step 8: Launch TUI
   log("Launching memex...");
 
   // Enter alternate screen buffer (like Textual / vim / Claude Code)
@@ -245,7 +203,7 @@ async function main() {
   const { waitUntilExit } = render(<App firstRun={firstRun} />, { stdin: filteredStdin as any });
   await waitUntilExit();
 
-  // Step 11: Cleanup
+  // Step 9: Cleanup
   exitAltScreen();
   cleanupAll();
 }

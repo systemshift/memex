@@ -9,10 +9,8 @@ import { $ } from "bun";
 
 const BIN_DIR = join(homedir(), ".memex", "bin");
 
-const MEMEX_SERVER_VERSION = "v0.1.0";
 const KUBO_VERSION = "v0.32.1";
 
-const MEMEX_SERVER_REPO = "systemshift/memex-server";
 const KUBO_REPO = "ipfs/kubo";
 
 function detectPlatform(): { os: string; arch: string } {
@@ -113,42 +111,6 @@ function whichSync(name: string): string | null {
     }
   } catch {}
   return null;
-}
-
-export async function ensureMemexServer(): Promise<string> {
-  // Check env var
-  const envServer = process.env.MEMEX_SERVER;
-  if (envServer && existsSync(envServer)) return envServer;
-
-  // Check PATH
-  const pathBin = whichSync("memex-server");
-  if (pathBin) return pathBin;
-
-  // Check cache
-  const cached = join(BIN_DIR, "memex-server");
-  if (existsSync(cached)) return cached;
-
-  // Download
-  console.log("\x1b[0;32m[memex]\x1b[0m memex-server not found, downloading...");
-  try {
-    const { os: osName, arch } = detectPlatform();
-    const osLabel = osName === "linux" ? "Linux" : "Darwin";
-    const archLabel = arch === "amd64" ? "x86_64" : "arm64";
-
-    const filename = `memex-server_${osLabel}_${archLabel}.tar.gz`;
-    const url = `https://github.com/${MEMEX_SERVER_REPO}/releases/download/${MEMEX_SERVER_VERSION}/${filename}`;
-
-    const archivePath = join(BIN_DIR, filename);
-    await downloadFile(url, archivePath, "memex-server");
-    await extractBinary(archivePath, "memex-server", cached);
-
-    console.log(`\x1b[0;32m[memex]\x1b[0m memex-server installed to ${cached}`);
-    return cached;
-  } catch (e: any) {
-    console.error(`\x1b[0;31m[memex]\x1b[0m Failed to download memex-server: ${e.message}`);
-    console.error(`\x1b[0;31m[memex]\x1b[0m Install manually from: https://github.com/${MEMEX_SERVER_REPO}/releases`);
-    process.exit(1);
-  }
 }
 
 export async function ensureIpfs(): Promise<string> {

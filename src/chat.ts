@@ -23,7 +23,7 @@ export class ChatEngine {
 
   async loadMemory(): Promise<void> {
     if (this.memoryLoaded || this.firstRun) return;
-    const prior = await loadRecentConversations(20);
+    const prior = loadRecentConversations(20);
     if (prior.length) {
       this.messages.unshift(...prior);
     }
@@ -89,11 +89,13 @@ export class ChatEngine {
       if (textBuffer) {
         this.messages.push({ role: "assistant", content: textBuffer });
         // Auto-ingest in background — don't await
-        ingestConversationTurn(
-          userInput,
-          textBuffer,
-          this.toolNamesThisTurn.length ? this.toolNamesThisTurn : undefined,
-        ).catch(() => {});
+        try {
+          ingestConversationTurn(
+            userInput,
+            textBuffer,
+            this.toolNamesThisTurn.length ? this.toolNamesThisTurn : undefined,
+          );
+        } catch {}
       }
       return;
     }
