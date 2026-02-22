@@ -4,6 +4,7 @@
 
 import React from "react";
 import { Text, Box } from "ink";
+import { renderMarkdown } from "./markdown";
 
 interface MessageProps {
   role: "user" | "assistant" | "system" | "error" | "tool";
@@ -24,7 +25,7 @@ export function Message({ role, content, width }: MessageProps) {
       return (
         <Box width={width} flexShrink={0}>
           <Text bold color="green">Memex: </Text>
-          <Text wrap="wrap">{content}</Text>
+          <Text wrap="wrap">{renderMarkdown(content)}</Text>
         </Box>
       );
     case "system":

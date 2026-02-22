@@ -5,6 +5,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { Message } from "./Message";
+import { renderMarkdown } from "./markdown";
 
 export interface ChatMessage {
   id: number;
@@ -96,7 +97,7 @@ export function ChatLog({ messages, streamingText, status, height, width, scroll
       {!scrolled && streamingText ? (
         <Box width={innerWidth} flexShrink={0}>
           <Text bold color="green">Memex: </Text>
-          <Text wrap="wrap">{streamingText}</Text>
+          <Text wrap="wrap">{renderMarkdown(streamingText)}</Text>
         </Box>
       ) : null}
 
