@@ -1,14 +1,20 @@
 /**
- * Ink root: fullscreen layout, state, input handling.
- * Uses alternate screen buffer for a proper TUI experience.
+ * Ink root: uses <Static> for completed messages (native scrollback)
+ * and a dynamic area for streaming response + status + input.
  */
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Box, useInput, useApp, Text } from "ink";
-import { ChatLog, type ChatMessage } from "./components/ChatLog";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { Box, Static, useInput, useApp, Text } from "ink";
+import { Message } from "./components/Message";
 import { InputBar } from "./components/InputBar";
 import { ChatEngine } from "./chat";
-import { onScroll, offScroll } from "./mouse";
+import { renderMarkdown } from "./components/markdown";
+
+export interface ChatMessage {
+  id: number;
+  role: "user" | "assistant" | "system" | "error" | "tool";
+  content: string;
+}
 
 interface AppProps {
   firstRun: boolean;
@@ -16,45 +22,17 @@ interface AppProps {
 
 let msgCounter = 0;
 
-function useTerminalSize() {
-  const [size, setSize] = useState({
-    rows: process.stdout.rows || 24,
-    cols: process.stdout.columns || 80,
-  });
-
-  useEffect(() => {
-    const onResize = () => {
-      setSize({
-        rows: process.stdout.rows || 24,
-        cols: process.stdout.columns || 80,
-      });
-    };
-    process.stdout.on("resize", onResize);
-    return () => { process.stdout.off("resize", onResize); };
-  }, []);
-
-  return size;
-}
-
 export function App({ firstRun }: AppProps) {
   const { exit } = useApp();
-  const { rows, cols } = useTerminalSize();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [status, setStatus] = useState("");
-  const [scrollOffset, setScrollOffset] = useState(0);
-  const engineRef = useRef<ChatEngine | null>(null);
-
-  if (!engineRef.current) {
-    engineRef.current = new ChatEngine(firstRun);
-  }
-  const engine = engineRef.current;
+  const [engine] = useState(() => new ChatEngine(firstRun));
 
   const addMessage = useCallback((role: ChatMessage["role"], content: string) => {
     setMessages((prev) => [...prev, { id: ++msgCounter, role, content }]);
-    setScrollOffset(0); // snap to bottom on new message
   }, []);
 
   // Load memory or auto-greet on mount
@@ -126,7 +104,6 @@ export function App({ firstRun }: AppProps) {
       }
 
       addMessage("user", trimmed);
-      setScrollOffset(0);
       setStreaming(true);
       setStatus("Thinking...");
 
@@ -188,54 +165,53 @@ export function App({ firstRun }: AppProps) {
     [streaming, engine, addMessage, exit],
   );
 
-  // Mouse wheel scroll via filtered stdin (see mouse.ts)
-  const messagesLenRef = useRef(messages.length);
-  messagesLenRef.current = messages.length;
-
-  useEffect(() => {
-    onScroll((dir) => {
-      if (dir === "up") {
-        setScrollOffset((prev) => Math.min(prev + 1, messagesLenRef.current - 1));
-      } else {
-        setScrollOffset((prev) => Math.max(prev - 1, 0));
-      }
-    });
-    return () => offScroll();
-  }, []);
-
   useInput((_input, key) => {
     if (key.ctrl && _input === "c") {
       exit();
     }
-    // Shift+Up/Down: keyboard scroll fallback
-    if (key.shift && key.upArrow) {
-      setScrollOffset((prev) => Math.min(prev + 3, messages.length - 1));
-    }
-    if (key.shift && key.downArrow) {
-      setScrollOffset((prev) => Math.max(prev - 3, 0));
-    }
   });
 
-  // Layout: chat panel takes all space minus 1 row for input
-  const chatHeight = rows - 1;
+  // Truncate streaming text so the dynamic area never overflows the viewport.
+  // When it overflows, Ink fires clearTerminal (\x1b[3J) which nukes scrollback.
+  const rows = process.stdout.rows || 24;
+  const cols = process.stdout.columns || 80;
+  const maxStreamLines = Math.max(4, rows - 4); // reserve: status + input + margin
+
+  const visibleStreamingText = useMemo(() => {
+    if (!streamingText) return "";
+    // Account for line wrapping at terminal width
+    const lines = streamingText.split("\n");
+    let wrappedCount = 0;
+    const kept: string[] = [];
+    // Walk backwards to keep the most recent content
+    for (let i = lines.length - 1; i >= 0 && wrappedCount < maxStreamLines; i--) {
+      const lineLen = (i === 0 ? 7 : 0) + lines[i].length; // "Memex: " prefix on first line
+      const wrapped = Math.max(1, Math.ceil(lineLen / cols));
+      wrappedCount += wrapped;
+      kept.unshift(lines[i]);
+    }
+    if (kept.length < lines.length) {
+      kept[0] = "..." + kept[0];
+    }
+    return kept.join("\n");
+  }, [streamingText, maxStreamLines, cols]);
 
   return (
-    <Box flexDirection="column" width={cols} height={rows}>
-      <ChatLog
-        messages={messages}
-        streamingText={streamingText}
-        status={status}
-        height={chatHeight}
-        width={cols}
-        scrollOffset={scrollOffset}
-      />
-      <InputBar
-        value={input}
-        onChange={setInput}
-        onSubmit={handleSubmit}
-        disabled={streaming}
-        width={cols}
-      />
-    </Box>
+    <>
+      <Static items={messages}>
+        {(msg) => <Message key={msg.id} role={msg.role} content={msg.content} />}
+      </Static>
+
+      {visibleStreamingText ? (
+        <Box>
+          <Text bold color="green">Memex: </Text>
+          <Text wrap="wrap">{renderMarkdown(visibleStreamingText)}</Text>
+        </Box>
+      ) : null}
+
+      {status ? <Text dimColor italic>{status}</Text> : null}
+
+      <InputBar value={input} onChange={setInput} onSubmit={handleSubmit} disabled={streaming} />
+    </>
   );
 }

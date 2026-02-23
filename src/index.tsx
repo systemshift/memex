@@ -7,7 +7,6 @@ import { render } from "ink";
 import { join } from "path";
 import { homedir } from "os";
 import { App } from "./app";
-import { createFilteredStdin, enableMouseTracking, disableMouseTracking } from "./mouse";
 import { ensureIpfs } from "./binaries";
 import * as emailModule from "./email";
 import { ingestNewEmails } from "./email-ingest";
@@ -184,33 +183,32 @@ async function main() {
   }
 
   // Step 8: Launch TUI
-  log("Launching memex...");
+  log("Launching memex...\n");
 
-  // Enter alternate screen buffer (like Textual / vim / Claude Code)
-  process.stdout.write("\x1b[?1049h"); // enter alt screen
-  process.stdout.write("\x1b[H");      // move cursor home
-
-  // Set up mouse tracking with filtered stdin so scroll codes
-  // don't leak into Ink's TextInput
-  const filteredStdin = createFilteredStdin();
-  enableMouseTracking();
-
-  const exitAltScreen = () => {
-    disableMouseTracking();
-    process.stdout.write("\x1b[?1049l"); // exit alt screen
+  // Fix terminal scrollback for VTE-based terminals (Terminator, etc.).
+  // Two problems with stock Ink:
+  // 1. clearTerminal emits \x1b[3J which nukes the scrollback buffer — strip it.
+  // 2. Ink's rapid cursor-up/erase-line cycle makes VTE suppress user scrollback.
+  //    Wrapping each write in DEC 2026 synchronized update sequences tells VTE to
+  //    apply the frame atomically, preserving normal scroll behavior.
+  const origWrite = process.stdout.write.bind(process.stdout);
+  const SYNC_START = "\x1b[?2026h";
+  const SYNC_END = "\x1b[?2026l";
+  (process.stdout as any).write = (chunk: any, ...args: any[]) => {
+    if (typeof chunk === "string") {
+      chunk = SYNC_START + chunk.replace(/\x1b\[3J/g, "") + SYNC_END;
+    }
+    return origWrite(chunk, ...args);
   };
 
-  const { waitUntilExit } = render(<App firstRun={firstRun} />, { stdin: filteredStdin as any });
+  const { waitUntilExit } = render(<App firstRun={firstRun} />);
   await waitUntilExit();
 
   // Step 9: Cleanup
-  exitAltScreen();
   cleanupAll();
 }
 
 main().catch((e) => {
-  disableMouseTracking();
-  process.stdout.write("\x1b[?1049l"); // exit alt screen on crash
   console.error(e);
   cleanupAll();
   process.exit(1);
