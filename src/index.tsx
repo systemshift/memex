@@ -24,6 +24,7 @@ import {
   warn,
   error,
 } from "./services";
+import { printSplash } from "./splash";
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -84,7 +85,7 @@ async function main() {
     error("Start it with: memex-fs -data " + opts.data + " -mount " + opts.mount);
     process.exit(1);
   }
-  log(`Mount: ${opts.mount}`);
+  printSplash("0.2.0", opts.mount, opts.data);
 
   // Set env vars for tools
   process.env.MEMEX_MOUNT = opts.mount;
@@ -183,7 +184,6 @@ async function main() {
   }
 
   // Step 8: Launch TUI
-  log("Launching memex...\n");
 
   // Fix terminal scrollback for VTE-based terminals (Terminator, etc.).
   // Two problems with stock Ink:
