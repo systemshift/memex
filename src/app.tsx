@@ -209,7 +209,7 @@ export function App({ firstRun }: AppProps) {
         </Box>
       ) : null}
 
-      {status ? <Text dimColor italic>{status}</Text> : null}
+      {status ? <Text color="#E87B35" italic>{status}</Text> : null}
 
       <InputBar value={input} onChange={setInput} onSubmit={handleSubmit} disabled={streaming} />
     </>
