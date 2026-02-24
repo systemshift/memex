@@ -12,8 +12,8 @@ import { homedir } from "os";
 // noble/ed25519 v2 requires sha512 configuration
 ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m));
 
-const DAGIT_DIR = join(homedir(), ".dagit");
-const IDENTITY_FILE = join(DAGIT_DIR, "identity.json");
+const MEMEX_CONFIG_DIR = join(homedir(), ".config", "memex");
+const IDENTITY_FILE = join(MEMEX_CONFIG_DIR, "identity.json");
 
 // Multicodec prefix for Ed25519 public key (0xed01)
 const ED25519_MULTICODEC = new Uint8Array([0xed, 0x01]);
@@ -46,7 +46,7 @@ export function decodeDid(did: string): Uint8Array {
 }
 
 export async function createIdentity(): Promise<Identity> {
-  mkdirSync(DAGIT_DIR, { recursive: true });
+  mkdirSync(MEMEX_CONFIG_DIR, { recursive: true });
 
   const privateKey = ed.utils.randomPrivateKey();
   const publicKey = await ed.getPublicKeyAsync(privateKey);

@@ -71,23 +71,19 @@ export async function waitForIpfs(timeout = 30000): Promise<boolean> {
   return false;
 }
 
-export async function ensureDagitIdentity(): Promise<string> {
-  const identityPath = join(homedir(), ".dagit", "identity.json");
+export async function ensureIdentity(): Promise<string> {
+  const { loadIdentity, createIdentity } = await import("./identity");
 
-  if (existsSync(identityPath)) {
-    const data = JSON.parse(await Bun.file(identityPath).text());
-    return data.did ?? "unknown";
-  }
+  const existing = await loadIdentity();
+  if (existing) return existing.did ?? "unknown";
 
-  // Create identity inline (same as dagit.identity.create)
-  log("Creating dagit identity...");
+  log("Creating identity...");
   try {
-    const { createIdentity } = await import("./identity");
     const identity = await createIdentity();
     log(`Identity created: ${identity.did}`);
     return identity.did;
   } catch (e: any) {
-    warn(`Could not create dagit identity: ${e.message}`);
+    warn(`Could not create identity: ${e.message}`);
     return "unknown";
   }
 }

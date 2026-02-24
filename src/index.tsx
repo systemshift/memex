@@ -15,7 +15,7 @@ import {
   isIpfsRunning,
   startIpfsDaemon,
   waitForIpfs,
-  ensureDagitIdentity,
+  ensureIdentity,
   isMounted,
   isGraphEmpty,
   cleanupAll,
@@ -131,8 +131,8 @@ async function main() {
     }
   }
 
-  // Step 6: Ensure dagit identity
-  const did = await ensureDagitIdentity();
+  // Step 6: Ensure identity
+  const did = await ensureIdentity();
   if (did !== "unknown") {
     log(`Identity: ${did}`);
   }
@@ -161,19 +161,17 @@ async function main() {
     });
   }
 
-  // Auto-check followed feeds on startup (fire-and-forget)
+  // Auto-check followed feeds on startup via FUSE (fire-and-forget)
   if (ipfsBin && !opts.skipIpfs) {
     const { existsSync } = await import("fs");
-    const followingFile = join(homedir(), ".dagit", "following.json");
-    if (existsSync(followingFile)) {
+    const feedsDir = join(opts.mount, "feeds", "following");
+    if (existsSync(feedsDir)) {
       log("Checking followed feeds...");
-      const feedProc = Bun.spawn(["dagit", "check-feeds"], { stdout: "pipe", stderr: "ignore" });
-      feedProc.exited.then(async (code) => {
-        if (code === 0) {
-          const out = await new Response(feedProc.stdout).text();
-          log(`Feeds: ${out.trim()}`);
-        }
-      }).catch(() => {});
+      try {
+        const syncFile = join(opts.mount, "feeds", "sync");
+        await Bun.file(syncFile).text();
+        log("Feed sync triggered");
+      } catch {}
     }
   }
 
