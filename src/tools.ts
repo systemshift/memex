@@ -501,6 +501,12 @@ function executeMemex(name: string, args: Record<string, any>): string {
           lines.push(`  ${k}: ${v}`);
         }
       }
+      if (node.content) {
+        const content = node.content.length > 4000
+          ? node.content.slice(0, 4000) + "\n[...truncated]"
+          : node.content;
+        lines.push(`  Content:\n${content}`);
+      }
       return lines.join("\n");
     }
 
