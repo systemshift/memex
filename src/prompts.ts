@@ -30,6 +30,7 @@ Tools — Social Network:
 - dagit_unfollow: Unfollow a person by DID
 - dagit_following: List all followed feeds and their status
 - dagit_check_feeds: Poll all followed feeds for new posts via IPNS resolution
+- dagit_register: Register your DID with a community supernode
 
 Tools — Email Integration:
 - email_status: Check if email is configured, connection health, domain filters, last check

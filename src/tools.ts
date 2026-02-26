@@ -1,5 +1,5 @@
 /**
- * 21 tool definitions + execution (9 memex, 9 dagit, 3 email).
+ * 22 tool definitions + execution (9 memex, 10 dagit, 3 email).
  */
 
 import { createHash } from "crypto";
@@ -412,6 +412,19 @@ export const TOOL_DEFS: any[] = [
     parameters: { type: "object", properties: {}, required: [] },
     strict: false,
   },
+  {
+    type: "function",
+    name: "dagit_register",
+    description: "Register your DID with a community supernode so it polls your feed and includes your posts in the curated community feed",
+    parameters: {
+      type: "object",
+      properties: {
+        server: { type: "string", description: "The supernode URL (e.g. http://localhost:5000)" },
+      },
+      required: ["server"],
+    },
+    strict: false,
+  },
   // Email tools
   {
     type: "function",
@@ -710,6 +723,25 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
     case "dagit_check_feeds": {
       if (!(await ipfs.isAvailable())) return "Error: IPFS daemon not available";
       return runDagitCli(["check-feeds"]);
+    }
+
+    case "dagit_register": {
+      if (!args.server) return "Error: server URL is required";
+      const ident = await identity.loadIdentity();
+      if (!ident) return "Error: No identity found. Initialize first.";
+      const url = args.server.replace(/\/+$/, "") + "/register";
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ did: ident.did }),
+        });
+        const body = await resp.json();
+        if (!resp.ok) return `Error: ${body.error ?? resp.statusText}`;
+        return JSON.stringify(body, null, 2);
+      } catch (e: any) {
+        return `Error: could not reach ${url} — ${e.message}`;
+      }
     }
 
     default:
