@@ -169,11 +169,11 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_search",
-    description: "Full-text search across all nodes in the knowledge graph",
+    description: "Full-text keyword search across all nodes in the knowledge graph. Searches content and metadata. Use short keyword queries (e.g. 'machine learning', 'Alice'). Returns node IDs, types, and labels — call memex_get_node to read full content.",
     parameters: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Search terms" },
+        query: { type: "string", description: "Search keywords (e.g. 'neural networks', 'project alpha')" },
         limit: { type: "integer", description: "Max results (default 10)" },
       },
       required: ["query"],
@@ -183,11 +183,11 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_get_node",
-    description: "Get full details of a specific node by ID",
+    description: "Get full details of a node: type, metadata, and content. Use after memex_search to read a specific result.",
     parameters: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Node ID (e.g. person:001)" },
+        id: { type: "string", description: "Node ID (e.g. 'person:a1b2c3d4', 'sha256:abc...')" },
       },
       required: ["id"],
     },
@@ -196,7 +196,7 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_get_links",
-    description: "Get all relationships for a node",
+    description: "Get all incoming and outgoing relationships for a node. Returns edges like: --[mentions]--> target or <--[authored_by]-- source. Common link types: related_to, mentions, authored_by, extracted_from, part_of.",
     parameters: {
       type: "object",
       properties: {
@@ -209,12 +209,12 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_traverse",
-    description: "Traverse graph from a starting node",
+    description: "Breadth-first traversal from a starting node, following outgoing links. Returns all reachable nodes within depth. Use to map a node's neighborhood. For deeper exploration with synthesis, prefer graph_explore.",
     parameters: {
       type: "object",
       properties: {
         start: { type: "string", description: "Starting node ID" },
-        depth: { type: "integer", description: "Hops to follow (default 2)" },
+        depth: { type: "integer", description: "Max hops to follow (default 2, max useful ~4)" },
       },
       required: ["start"],
     },
@@ -223,11 +223,11 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_filter",
-    description: "Filter nodes by type",
+    description: "List all nodes of a given type. Returns node IDs only. Valid types: Note, Person, Concept, Document, Source, Lens, Claim, Reference.",
     parameters: {
       type: "object",
       properties: {
-        type: { type: "string", description: "Node type (Person, Document, etc.)" },
+        type: { type: "string", description: "Node type (e.g. 'Person', 'Note', 'Concept', 'Source')" },
         limit: { type: "integer", description: "Max results (default 20)" },
       },
       required: ["type"],
@@ -237,13 +237,13 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_create_node",
-    description: "Create a new node in the knowledge graph",
+    description: "Create a new node in the knowledge graph. The node ID is auto-generated as 'type:hash8'. Use memex_create_link afterward to connect it to related nodes.",
     parameters: {
       type: "object",
       properties: {
-        type: { type: "string", description: "Node type (Note, Document, Person, etc.)" },
-        content: { type: "string", description: "Main content or description" },
-        title: { type: "string", description: "Title or name for the node" },
+        type: { type: "string", description: "Node type: Note, Person, Concept, Document, Claim, Reference, Lens" },
+        content: { type: "string", description: "Main content body of the node" },
+        title: { type: "string", description: "Short title or name (stored in metadata)" },
       },
       required: ["type", "content"],
     },
@@ -252,7 +252,7 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_ingest",
-    description: "Ingest raw content into memex as a content-addressed Source node. Use this to save articles, web pages, documents, or any raw text the user wants to remember. Content is deduplicated by SHA256 hash.",
+    description: "Ingest raw content as a content-addressed Source node (ID: sha256:hash). Use for articles, web pages, documents, or any raw text. Automatically deduplicates — ingesting the same content twice returns the existing node. Prefer memex_create_node for structured entities; use this for raw source material.",
     parameters: {
       type: "object",
       properties: {
@@ -266,12 +266,12 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_update_node",
-    description: "Update an existing node's metadata or content",
+    description: "Update an existing node's metadata fields (title, name, tags, etc.). Merges with existing metadata — only specified fields are changed. Does NOT update the node's content body.",
     parameters: {
       type: "object",
       properties: {
         id: { type: "string", description: "Node ID to update" },
-        meta: { type: "object", description: "Metadata fields to update" },
+        meta: { type: "object", description: "Metadata fields to set or update (e.g. {\"title\": \"New Title\", \"tags\": [\"ai\"]})" },
       },
       required: ["id", "meta"],
     },
@@ -280,13 +280,13 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "memex_create_link",
-    description: "Create a relationship between two nodes in the knowledge graph",
+    description: "Create a directed relationship between two nodes. Idempotent — creating the same link twice is safe. Common types: related_to, mentions, authored_by, part_of, extracted_from, references.",
     parameters: {
       type: "object",
       properties: {
-        source: { type: "string", description: "Source node ID" },
-        target: { type: "string", description: "Target node ID" },
-        type: { type: "string", description: "Relationship type (e.g. related_to, mentions, authored_by)" },
+        source: { type: "string", description: "Source node ID (the 'from' end)" },
+        target: { type: "string", description: "Target node ID (the 'to' end)" },
+        type: { type: "string", description: "Relationship type (e.g. 'related_to', 'mentions', 'authored_by')" },
       },
       required: ["source", "target", "type"],
     },
@@ -296,7 +296,7 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "graph_explore",
-    description: "Deep exploration of the knowledge graph using recursive search, reading, and link-following. Use for questions needing more than a simple search — reads content, follows connections, synthesizes across multiple nodes.",
+    description: "Deep autonomous exploration of the knowledge graph. A sub-agent recursively searches, reads full content, follows links, and synthesizes a comprehensive answer. Use for complex questions like 'what do I know about X?', 'summarize everything related to Y', or 'how are A and B connected?'. Slower than memex_search but much more thorough.",
     parameters: {
       type: "object",
       properties: {
@@ -590,7 +590,7 @@ function executeMemex(name: string, args: Record<string, any>): string {
       const shortHash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
       const nodeId = `${prefix}:${shortHash}`;
 
-      const meta: Record<string, any> = { content };
+      const meta: Record<string, any> = {};
       if (title) meta.title = title;
 
       fsCreateNode(nodeId, content, meta);

@@ -23,7 +23,7 @@ export class ChatProvider {
   private _lastResponseId: string | null = null;
 
   constructor(model?: string) {
-    this.model = model ?? process.env.OPENAI_MODEL ?? "gpt-5.2";
+    this.model = model ?? process.env.OPENAI_MODEL ?? "gpt-5.4";
   }
 
   private getClient(): OpenAI {

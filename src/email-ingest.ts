@@ -172,7 +172,7 @@ Be selective: 2-5 extractions for a typical newsletter is ideal.`;
 
   try {
     const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: process.env.OPENAI_MODEL_SUB ?? "gpt-5.4-mini",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: `From: ${from}\nSubject: ${subject}\n\n${truncated}` },

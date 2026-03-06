@@ -203,21 +203,26 @@ export async function exploreGraph(question: string): Promise<string> {
   const messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: string; tool_call_id?: string }> = [
     {
       role: "system",
-      content: `You are a knowledge graph explorer. Answer the user's question by navigating their personal knowledge graph.
+      content: `You are exploring a personal knowledge graph to answer a question. Navigate by reading nodes, searching, and following links.
 
-Actions: read_node, search_graph, follow_links, report_finding, stop_exploring
+Graph structure:
+- Node types: Note, Person, Concept, Document, Source, Lens, Claim, Reference
+- Node IDs: "type:hash8" (e.g. "person:a1b2c3d4") or "sha256:..." for ingested content
+- Link types: related_to, mentions, authored_by, extracted_from, part_of, references
+- Source nodes contain raw content (articles, conversations). Other nodes are structured entities.
 
 Strategy:
-- Read the most promising search results first
-- Follow links to discover connections
-- Call report_finding for anything relevant to the question
-- Call stop_exploring when you have enough or no leads remain
+1. Read the most promising search results first (read_node)
+2. Follow links to discover connections (follow_links)
+3. Try alternative search terms if initial results are sparse — synonyms, related concepts, partial names
+4. Call report_finding for each relevant piece of information
+5. Call stop_exploring when you have enough findings or no leads remain
 
-Budget: ${MAX_READS} reads, ${MAX_LLM_CALLS} LLM calls remaining`,
+Budget: ${MAX_READS} reads, ${MAX_LLM_CALLS} turns. Be efficient — read selectively, not exhaustively.`,
     },
     {
       role: "user",
-      content: `Question: ${question}\n\nInitial search results:\n${formatInitialResults(initialResults)}\n\nExplore these results to answer the question. Read promising nodes, follow links, and report findings.`,
+      content: `Question: ${question}\n\nInitial search results:\n${formatInitialResults(initialResults)}\n\nExplore these to answer the question.`,
     },
   ];
 
@@ -229,7 +234,7 @@ Budget: ${MAX_READS} reads, ${MAX_LLM_CALLS} LLM calls remaining`,
     let response;
     try {
       response = await client.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: process.env.OPENAI_MODEL_SUB ?? "gpt-5.4-mini",
         messages: messages as any,
         tools: SUB_LLM_TOOLS,
         tool_choice: "auto",
@@ -270,11 +275,11 @@ Budget: ${MAX_READS} reads, ${MAX_LLM_CALLS} LLM calls remaining`,
       if (stop) shouldStop = true;
     }
 
-    // Inject budget update as a short system-style note in the next user turn
+    // Inject budget update as system context
     if (!shouldStop && llmCallsUsed < MAX_LLM_CALLS) {
       messages.push({
-        role: "user",
-        content: `[Budget: ${budget.readsLeft} reads, ${MAX_LLM_CALLS - llmCallsUsed} LLM calls remaining. ${findings.length} findings so far.]`,
+        role: "system",
+        content: `Budget: ${budget.readsLeft} reads, ${MAX_LLM_CALLS - llmCallsUsed} turns remaining. ${findings.length} findings so far.`,
       });
     }
   }
@@ -293,11 +298,11 @@ Budget: ${MAX_READS} reads, ${MAX_LLM_CALLS} LLM calls remaining`,
 
   try {
     const synthesis = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: process.env.OPENAI_MODEL_SUB ?? "gpt-5.4-mini",
       messages: [
         {
           role: "system",
-          content: "Synthesize the following findings from a knowledge graph exploration into a comprehensive answer. Include specifics — names, dates, key details. Note if information seems incomplete.",
+          content: "Synthesize the following findings from a knowledge graph exploration into a concise answer. Include specifics — names, dates, key details. Note if information seems incomplete. Be direct, no preamble.",
         },
         {
           role: "user",
