@@ -1,5 +1,6 @@
 /**
  * 23 tool definitions + execution (10 memex, 10 dagit, 3 email).
+ * Dagit posts (outbound + inbound) are ingested as Post nodes in the graph.
  */
 
 import { createHash } from "crypto";
@@ -138,6 +139,22 @@ export function fsCreateLink(source: string, target: string, linkType: string): 
 function extractInlineRefs(content: string): string[] {
   const matches = content.matchAll(/\[\[([\w]+:[a-f0-9]{8,64})\]\]/g);
   return [...new Set([...matches].map(m => m[1]))];
+}
+
+// --- Dagit following.json reader ---
+
+function readFollowingCids(): Array<{ did: string; alias: string; cids: string[] }> {
+  try {
+    const raw = readFileSync(join(homedir(), ".dagit", "following.json"), "utf-8");
+    const entries = JSON.parse(raw);
+    return entries.map((e: any) => ({
+      did: e.did ?? "",
+      alias: e.alias ?? e.name ?? "",
+      cids: e.lastSeenCids ?? [],
+    }));
+  } catch {
+    return [];
+  }
 }
 
 // --- Petname generator (deterministic, matches dagit/feed.py) ---
@@ -337,7 +354,7 @@ export const TOOL_DEFS: any[] = [
   {
     type: "function",
     name: "dagit_post",
-    description: "Post a message to the dagit network. Signs with your identity and publishes to IPFS.",
+    description: "Post a message to the dagit network. Signs with your identity, publishes to IPFS, and saves as a Post node in your graph. When composing posts informed by existing knowledge, use [[node-id]] to reference source nodes.",
     parameters: {
       type: "object",
       properties: {
@@ -755,7 +772,26 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
       const cid = await messages.publish(args.content, args.refs ?? undefined, args.tags ?? undefined);
       // Update IPNS feed index (fire-and-forget)
       runDagitPython(`from dagit.feed import publish_feed; publish_feed("${cid}")`);
-      return JSON.stringify({ cid, content: args.content, refs: args.refs, tags: args.tags }, null, 2);
+
+      // Ingest post into graph
+      const postId = `post:${cid.slice(0, 8)}`;
+      const ident = await identity.loadIdentity();
+      fsCreateNode(postId, args.content, {
+        cid,
+        author_did: ident?.did ?? "",
+        tags: args.tags ?? [],
+        timestamp: new Date().toISOString(),
+        published_by_me: true,
+      });
+      if (ident?.did) {
+        const personId = `person:${createHash("sha256").update(ident.did).digest("hex").slice(0, 8)}`;
+        try { fsCreateLink(postId, personId, "authored_by"); } catch {}
+      }
+      for (const ref of extractInlineRefs(args.content)) {
+        if (fsReadNode(ref)) fsCreateLink(postId, ref, "references");
+      }
+
+      return JSON.stringify({ cid, postId, content: args.content, refs: args.refs, tags: args.tags }, null, 2);
     }
 
     case "dagit_read": {
@@ -770,7 +806,31 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
       if (!(await ipfs.isAvailable())) return "Error: IPFS daemon not available";
       const replyCid = await messages.publish(args.content, [args.cid], args.tags ?? undefined);
       runDagitPython(`from dagit.feed import publish_feed; publish_feed("${replyCid}")`);
-      return JSON.stringify({ cid: replyCid, refs: [args.cid], tags: args.tags, content: args.content }, null, 2);
+
+      // Ingest reply into graph
+      const replyPostId = `post:${replyCid.slice(0, 8)}`;
+      const replyIdent = await identity.loadIdentity();
+      fsCreateNode(replyPostId, args.content, {
+        cid: replyCid,
+        author_did: replyIdent?.did ?? "",
+        tags: args.tags ?? [],
+        timestamp: new Date().toISOString(),
+        published_by_me: true,
+      });
+      if (replyIdent?.did) {
+        const personId = `person:${createHash("sha256").update(replyIdent.did).digest("hex").slice(0, 8)}`;
+        try { fsCreateLink(replyPostId, personId, "authored_by"); } catch {}
+      }
+      // Link to parent post
+      const parentPostId = `post:${args.cid.slice(0, 8)}`;
+      if (fsReadNode(parentPostId)) {
+        try { fsCreateLink(replyPostId, parentPostId, "reply_to"); } catch {}
+      }
+      for (const ref of extractInlineRefs(args.content)) {
+        if (fsReadNode(ref)) fsCreateLink(replyPostId, ref, "references");
+      }
+
+      return JSON.stringify({ cid: replyCid, postId: replyPostId, refs: [args.cid], tags: args.tags, content: args.content }, null, 2);
     }
 
     case "dagit_verify": {
@@ -807,7 +867,63 @@ async function executeDagit(name: string, args: Record<string, any>): Promise<st
 
     case "dagit_check_feeds": {
       if (!(await ipfs.isAvailable())) return "Error: IPFS daemon not available";
-      return runDagitCli(["check-feeds"]);
+
+      // Snapshot known CIDs before check
+      const beforeCids = readFollowingCids();
+
+      // Run Python feed check (resolves IPNS, updates following.json)
+      const summary = runDagitCli(["check-feeds"]);
+
+      // Snapshot CIDs after check — find new posts
+      const afterCids = readFollowingCids();
+      const newPosts: Array<{ did: string; alias: string; cid: string }> = [];
+      for (const entry of afterCids) {
+        const before = beforeCids.find(e => e.did === entry.did);
+        const knownSet = new Set(before?.cids ?? []);
+        for (const c of entry.cids) {
+          if (!knownSet.has(c)) {
+            newPosts.push({ did: entry.did, alias: entry.alias, cid: c });
+          }
+        }
+      }
+
+      // Fetch and ingest each new post
+      const ingested: string[] = [];
+      for (const np of newPosts) {
+        try {
+          const [feedPost, feedVerified] = await messages.fetchPost(np.cid);
+          if (!feedVerified) continue;
+
+          const feedPostId = `post:${np.cid.slice(0, 8)}`;
+          if (fsReadNode(feedPostId)) continue; // already ingested
+
+          fsCreateNode(feedPostId, feedPost.content, {
+            cid: np.cid,
+            author_did: feedPost.author,
+            tags: feedPost.tags ?? [],
+            timestamp: feedPost.timestamp,
+            published_by_me: false,
+            verified: true,
+          });
+
+          // Link to author Person node
+          const feedPersonId = `person:${createHash("sha256").update(np.did).digest("hex").slice(0, 8)}`;
+          try { fsCreateLink(feedPostId, feedPersonId, "authored_by"); } catch {}
+
+          // Link refs as reply_to
+          for (const ref of (feedPost.refs ?? [])) {
+            const refPostId = `post:${ref.slice(0, 8)}`;
+            if (fsReadNode(refPostId)) {
+              try { fsCreateLink(feedPostId, refPostId, "reply_to"); } catch {}
+            }
+          }
+
+          ingested.push(`  [Post] ${np.alias}: "${feedPost.content.slice(0, 80)}" (${feedPostId})`);
+        } catch {}
+      }
+
+      if (!ingested.length) return summary;
+      return summary + "\n\nIngested into graph:\n" + ingested.join("\n");
     }
 
     case "dagit_register": {
