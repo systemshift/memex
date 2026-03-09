@@ -929,7 +929,15 @@ async function executeEmail(name: string, args: Record<string, any>): Promise<st
         if (result.emailsFound === 0) {
           return "No new matching emails found.";
         }
-        return `Found ${result.emailsFound} new emails, processed ${result.emailsProcessed}. Created ${result.extractionsCreated} extractions.`;
+        const lines = [
+          `Found ${result.emailsFound} new emails, created ${result.extractionsCreated} extractions:`,
+        ];
+        for (const ext of result.extractions) {
+          lines.push(`  [${ext.type}] ${ext.title} (${ext.nodeId})`);
+        }
+        lines.push("");
+        lines.push("Search the graph for connections between these new extractions and existing knowledge, then brief the user.");
+        return lines.join("\n");
       } catch (e: any) {
         return `Email check failed: ${e.message}`;
       }

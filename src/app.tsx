@@ -77,7 +77,43 @@ export function App({ firstRun }: AppProps) {
     } else {
       addMessage("system", "Welcome to Memex. Type \"help\" for commands, Ctrl+C to quit.");
       setStatus("Loading memory...");
-      engine.loadMemory().then(() => setStatus("")).catch(() => setStatus(""));
+      engine.loadMemory().then(() => {
+        setStreaming(true);
+        setStatus("Checking what's new...");
+
+        let buffer = "";
+        let textStatusSet = false;
+
+        engine
+          .send(
+            "Check for new content — run email_check_now if email is configured, and dagit_check_feeds if there are followed feeds. If there's anything new, surface it with connections to existing knowledge. If nothing new, just greet me briefly.",
+            (text) => {
+              buffer += text;
+              setStreamingText(buffer);
+              if (!textStatusSet) {
+                setStatus("Receiving response...");
+                textStatusSet = true;
+              }
+            },
+            (toolName) => {
+              textStatusSet = false;
+              const label = toolName.replace(/[\[\]]/g, "");
+              setStatus(`Running ${label}...`);
+            },
+          )
+          .then(() => {
+            if (buffer) addMessage("assistant", buffer);
+            setStreamingText("");
+            setStatus("");
+            setStreaming(false);
+          })
+          .catch((e: any) => {
+            addMessage("error", e.message);
+            setStreamingText("");
+            setStatus("");
+            setStreaming(false);
+          });
+      }).catch(() => setStatus(""));
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

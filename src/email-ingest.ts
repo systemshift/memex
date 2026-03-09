@@ -239,11 +239,18 @@ function createExtractionNode(
 
 // --- Full Pipeline ---
 
+export interface ExtractionSummary {
+  nodeId: string;
+  type: string;
+  title: string;
+}
+
 export interface IngestProgress {
   phase: "fetching" | "ingesting" | "extracting" | "done";
   emailsFound: number;
   emailsProcessed: number;
   extractionsCreated: number;
+  extractions: ExtractionSummary[];
 }
 
 export async function ingestNewEmails(
@@ -251,7 +258,7 @@ export async function ingestNewEmails(
 ): Promise<IngestProgress> {
   const config = email.loadConfig();
   if (!config.credentials || !config.enabled) {
-    return { phase: "done", emailsFound: 0, emailsProcessed: 0, extractionsCreated: 0 };
+    return { phase: "done", emailsFound: 0, emailsProcessed: 0, extractionsCreated: 0, extractions: [] };
   }
 
   const progress: IngestProgress = {
@@ -259,6 +266,7 @@ export async function ingestNewEmails(
     emailsFound: 0,
     emailsProcessed: 0,
     extractionsCreated: 0,
+    extractions: [],
   };
   onProgress?.(progress);
 
@@ -321,7 +329,10 @@ export async function ingestNewEmails(
     // Create nodes + links
     for (const extraction of extractions) {
       const nodeId = createExtractionNode(extraction, sourceId);
-      if (nodeId) progress.extractionsCreated++;
+      if (nodeId) {
+        progress.extractionsCreated++;
+        progress.extractions.push({ nodeId, type: extraction.type, title: extraction.title });
+      }
     }
 
     progress.emailsProcessed++;
