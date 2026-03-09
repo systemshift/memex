@@ -133,6 +133,13 @@ export function fsCreateLink(source: string, target: string, linkType: string): 
   }
 }
 
+// --- Inline reference extraction ---
+
+function extractInlineRefs(content: string): string[] {
+  const matches = content.matchAll(/\[\[([\w]+:[a-f0-9]{8,64})\]\]/g);
+  return [...new Set([...matches].map(m => m[1]))];
+}
+
 // --- Petname generator (deterministic, matches dagit/feed.py) ---
 
 const ADJECTIVES = [
@@ -594,6 +601,12 @@ function executeMemex(name: string, args: Record<string, any>): string {
       if (title) meta.title = title;
 
       fsCreateNode(nodeId, content, meta);
+
+      // Auto-link inline refs
+      for (const ref of extractInlineRefs(content)) {
+        if (fsReadNode(ref)) fsCreateLink(nodeId, ref, "references");
+      }
+
       return `Created ${ntype} node: ${nodeId}`;
     }
 
@@ -618,6 +631,12 @@ function executeMemex(name: string, args: Record<string, any>): string {
       };
 
       fsCreateNode(nodeId, content, meta);
+
+      // Auto-link inline refs
+      for (const ref of extractInlineRefs(content)) {
+        if (fsReadNode(ref)) fsCreateLink(nodeId, ref, "references");
+      }
+
       return `Ingested as ${nodeId}`;
     }
 

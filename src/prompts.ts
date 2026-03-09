@@ -14,6 +14,7 @@ Graph structure:
 - Node IDs look like "type:hash8" (e.g. "person:a1b2c3d4", "note:f9e8d7c6") or "sha256:full-hash" for ingested content
 - Link types: related_to, mentions, authored_by, extracted_from, part_of, interpreted_through
 - Nodes have: content (main text), meta.json (title, name, timestamps, etc.), type
+- When writing content that references existing nodes, use [[node-id]] syntax (e.g. [[person:a1b2c3d4]]). This auto-creates graph links.
 
 Behavior:
 - Every conversation turn is automatically ingested into the graph. You have memory across sessions.
