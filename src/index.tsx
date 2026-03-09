@@ -175,6 +175,9 @@ async function main() {
     }
   }
 
+  // Background embedding sync (fire-and-forget)
+  import("./embeddings").then(m => m.initEmbeddings()).catch(() => {});
+
   // Step 7: Check if graph is empty
   const firstRun = isGraphEmpty(opts.mount);
   if (firstRun) {

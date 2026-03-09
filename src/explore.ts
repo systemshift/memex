@@ -9,6 +9,7 @@ import {
   type NodeData,
   type LinkData,
 } from "./tools";
+import { semanticSearch } from "./embeddings";
 
 // --- Types ---
 
@@ -188,8 +189,26 @@ export async function exploreGraph(question: string): Promise<string> {
   const MAX_READS = 30;
   const MAX_LLM_CALLS = 8;
 
-  // Phase 1: Initial search
-  const initialResults = searchGraph(question, 10);
+  // Phase 1: Initial search (hybrid keyword + semantic)
+  const semanticIds = await semanticSearch(question, 10);
+  const keywordResults = searchGraph(question, 10);
+
+  // Merge both sets, deduped
+  const seen = new Set<string>();
+  const initialResults: NodeData[] = [];
+  for (const id of semanticIds) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      const node = fsReadNode(id);
+      if (node) initialResults.push(node);
+    }
+  }
+  for (const node of keywordResults) {
+    if (!seen.has(node.id)) {
+      seen.add(node.id);
+      initialResults.push(node);
+    }
+  }
   if (!initialResults.length) return "No relevant nodes found in the knowledge graph.";
 
   const OpenAI = (await import("openai")).default;

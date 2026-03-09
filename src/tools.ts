@@ -13,6 +13,7 @@ import * as ipfs from "./ipfs";
 import * as email from "./email";
 import { ingestNewEmails, stripHtml } from "./email-ingest";
 import { exploreGraph } from "./explore";
+import { semanticSearch, embedNode } from "./embeddings";
 
 export function getMountPath(): string {
   return process.env.MEMEX_MOUNT ?? join(homedir(), ".memex", "mount");
@@ -517,14 +518,30 @@ async function executeMemex(name: string, args: Record<string, any>): Promise<st
 
   switch (name) {
     case "memex_search": {
-      const nodeIds = fsSearchNodes(args.query, args.limit ?? 10);
-      if (!nodeIds.length) return `No results for '${args.query}'`;
-      const lines = [`Found ${nodeIds.length} results:`];
-      for (const nid of nodeIds) {
+      const limit = args.limit ?? 10;
+
+      // Keyword search (existing, fast)
+      const keywordIds = fsSearchNodes(args.query, limit);
+
+      // Vector search (if embeddings available)
+      const vectorIds = await semanticSearch(args.query, limit);
+
+      // Merge: vector results first (semantic), then keyword-only hits
+      const seen = new Set<string>();
+      const merged: string[] = [];
+      for (const id of [...vectorIds, ...keywordIds]) {
+        if (!seen.has(id)) { seen.add(id); merged.push(id); }
+      }
+      const limited = merged.slice(0, limit);
+
+      if (!limited.length) return `No results for '${args.query}'`;
+      const lines = [`Found ${limited.length} results:`];
+      for (const nid of limited) {
         const node = fsReadNode(nid);
         if (!node) continue;
         const label = node.meta.name ?? node.meta.title ?? nid;
-        lines.push(`  [${node.type}] ${label} (id: ${nid})`);
+        const snippet = node.content.slice(0, 120).replace(/\n/g, " ");
+        lines.push(`  [${node.type}] ${label} (id: ${nid})${snippet ? ` — ${snippet}` : ""}`);
       }
       return lines.join("\n");
     }
@@ -637,6 +654,9 @@ async function executeMemex(name: string, args: Record<string, any>): Promise<st
         if (fsReadNode(ref)) fsCreateLink(nodeId, ref, "references");
       }
 
+      // Background embed
+      embedNode(nodeId).catch(() => {});
+
       return `Created ${ntype} node: ${nodeId}`;
     }
 
@@ -666,6 +686,9 @@ async function executeMemex(name: string, args: Record<string, any>): Promise<st
       for (const ref of extractInlineRefs(content)) {
         if (fsReadNode(ref)) fsCreateLink(nodeId, ref, "references");
       }
+
+      // Background embed
+      embedNode(nodeId).catch(() => {});
 
       return `Ingested as ${nodeId}`;
     }
@@ -713,6 +736,9 @@ async function executeMemex(name: string, args: Record<string, any>): Promise<st
       for (const ref of extractInlineRefs(content)) {
         if (fsReadNode(ref)) fsCreateLink(nodeId, ref, "references");
       }
+
+      // Background embed
+      embedNode(nodeId).catch(() => {});
 
       return `Ingested "${title || url}" as ${nodeId} (${content.length} chars)`;
     }
