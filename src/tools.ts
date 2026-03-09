@@ -1,5 +1,5 @@
 /**
- * 22 tool definitions + execution (9 memex, 10 dagit, 3 email).
+ * 23 tool definitions + execution (10 memex, 10 dagit, 3 email).
  */
 
 import { createHash } from "crypto";
@@ -10,7 +10,7 @@ import * as identity from "./identity";
 import * as messages from "./messages";
 import * as ipfs from "./ipfs";
 import * as email from "./email";
-import { ingestNewEmails } from "./email-ingest";
+import { ingestNewEmails, stripHtml } from "./email-ingest";
 import { exploreGraph } from "./explore";
 
 export function getMountPath(): string {
@@ -272,6 +272,19 @@ export const TOOL_DEFS: any[] = [
   },
   {
     type: "function",
+    name: "memex_ingest_url",
+    description: "Fetch a web page by URL and ingest as a Source node. Strips HTML, extracts title, deduplicates by content hash. Use when the user wants to save an article, blog post, or web page.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Full URL to fetch (https://...)" },
+      },
+      required: ["url"],
+    },
+    strict: false,
+  },
+  {
+    type: "function",
     name: "memex_update_node",
     description: "Update an existing node's metadata fields (title, name, tags, etc.). Merges with existing metadata — only specified fields are changed. Does NOT update the node's content body.",
     parameters: {
@@ -482,7 +495,7 @@ export async function executeTool(name: string, args: Record<string, any>): Prom
   }
 }
 
-function executeMemex(name: string, args: Record<string, any>): string {
+async function executeMemex(name: string, args: Record<string, any>): Promise<string> {
   const mount = getMountPath();
 
   switch (name) {
@@ -638,6 +651,53 @@ function executeMemex(name: string, args: Record<string, any>): string {
       }
 
       return `Ingested as ${nodeId}`;
+    }
+
+    case "memex_ingest_url": {
+      const url = args.url ?? "";
+      if (!url) return "Error: url is required";
+
+      let html: string;
+      try {
+        const resp = await fetch(url, {
+          headers: { "User-Agent": "memex/0.2" },
+          redirect: "follow",
+        });
+        if (!resp.ok) return `Error: HTTP ${resp.status} ${resp.statusText}`;
+        html = await resp.text();
+      } catch (e: any) {
+        return `Error: could not fetch ${url} — ${e.message}`;
+      }
+
+      // Extract title before stripping
+      const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].trim() : "";
+
+      // Strip HTML to plain text
+      const content = stripHtml(html);
+      if (!content || content.length < 20) return "Error: page returned no meaningful content";
+
+      // Content-addressed dedup
+      const hash = createHash("sha256").update(content).digest("hex");
+      const nodeId = `sha256:${hash}`;
+      const nodeDir = join(mount, "nodes", nodeId);
+      try { statSync(nodeDir); return `Already ingested as ${nodeId}`; } catch {}
+
+      const meta: Record<string, any> = {
+        format: "html",
+        url,
+        ingested_at: new Date().toISOString(),
+      };
+      if (title) meta.title = title;
+
+      fsCreateNode(nodeId, content, meta);
+
+      // Auto-link inline refs
+      for (const ref of extractInlineRefs(content)) {
+        if (fsReadNode(ref)) fsCreateLink(nodeId, ref, "references");
+      }
+
+      return `Ingested "${title || url}" as ${nodeId} (${content.length} chars)`;
     }
 
     case "memex_update_node": {
