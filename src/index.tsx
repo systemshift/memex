@@ -10,6 +10,7 @@ import { App } from "./app";
 import { ensureIpfs } from "./binaries";
 import * as emailModule from "./email";
 import { ingestNewEmails } from "./email-ingest";
+import { captureDailyNote } from "./capture";
 import {
   ensureIpfsRepo,
   isIpfsRunning,
@@ -51,7 +52,11 @@ function parseArgs() {
         break;
       case "--help":
       case "-h":
-        console.log(`Usage: memex [options]
+        console.log(`Usage: memex [command] [options]
+
+Commands:
+  (default)        Launch chat TUI
+  capture          Open today's daily note in $EDITOR
 
 Options:
   --mount <path>   FUSE mountpoint (default: ~/.memex/mount)
@@ -68,6 +73,13 @@ Options:
 
 async function main() {
   const opts = parseArgs();
+
+  // `memex capture` is a short path: open today's daily note in $EDITOR and
+  // exit. No IPFS, no identity, no TUI — just touch the graph and quit.
+  if (process.argv[2] === "capture") {
+    await captureDailyNote({ mount: opts.mount });
+    return;
+  }
 
   registerCleanup();
 
