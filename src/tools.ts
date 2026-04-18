@@ -73,22 +73,22 @@ export function fsReadOutgoingLinks(nodeId: string): LinkData[] {
 }
 
 export function fsReadIncomingLinks(nodeId: string): LinkData[] {
-  const dataPath = getDataPath();
-  const linksFile = join(dataPath, ".mx", "links.jsonl");
-  const incoming: LinkData[] = [];
+  const mount = getMountPath();
+  const backlinksDir = join(mount, "nodes", nodeId, "backlinks");
   try {
-    const raw = readFileSync(linksFile, "utf-8");
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line);
-        if (entry.target === nodeId) {
-          incoming.push({ source: entry.source, target: entry.target, type: entry.type });
-        }
-      } catch {}
-    }
-  } catch {}
-  return incoming;
+    const entries = readdirSync(backlinksDir);
+    return entries.map(entry => {
+      const colonIdx = entry.indexOf(":");
+      if (colonIdx === -1) return { source: entry, target: nodeId, type: "related_to" };
+      return {
+        source: entry.slice(colonIdx + 1),
+        target: nodeId,
+        type: entry.slice(0, colonIdx),
+      };
+    });
+  } catch {
+    return [];
+  }
 }
 
 export function fsReadAllLinks(nodeId: string): LinkData[] {
