@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, LinkInfo } from "../api";
+import { useNodeLabels } from "../hooks/useNodeLabels";
 
 type Props = {
   nodeId: string;
@@ -16,7 +17,8 @@ type Props = {
  *   - Neighbors: ranked multi-signal relevance from memex-fs.
  *   - Outgoing links: what this node points at, by link type.
  *
- * Every peer id is clickable and navigates to that node.
+ * Each peer is rendered with a human label (meta.title, first line of
+ * content, or humanized id) — the raw id is still accessible on hover.
  */
 export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
   const [backlinks, setBacklinks] = useState<LinkInfo[]>([]);
@@ -47,6 +49,18 @@ export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
     };
   }, [nodeId, refreshKey]);
 
+  // Collect every peer id on display (dropping block suffixes so the
+  // parent's label is used) into a single batch label fetch.
+  const allIds = useMemo(() => {
+    const set = new Set<string>();
+    backlinks.forEach((l) => set.add(l.peer.split("#")[0]));
+    neighbors.forEach((p) => set.add(p));
+    outgoing.forEach((l) => set.add(l.peer.split("#")[0]));
+    return Array.from(set);
+  }, [backlinks, neighbors, outgoing]);
+
+  const labels = useNodeLabels(allIds, refreshKey);
+
   return (
     <aside className="right-panel">
       {error && <p className="error">{error}</p>}
@@ -58,6 +72,7 @@ export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
             key={l.link_type + l.peer}
             linkType={l.link_type}
             peer={l.peer}
+            labels={labels}
             onSelect={onSelect}
           />
         ))}
@@ -68,7 +83,7 @@ export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
           <p className="muted empty">no related nodes yet</p>
         )}
         {neighbors.map((peer) => (
-          <NodeRow key={peer} peer={peer} onSelect={onSelect} />
+          <NodeRow key={peer} peer={peer} labels={labels} onSelect={onSelect} />
         ))}
       </PanelSection>
 
@@ -79,6 +94,7 @@ export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
             key={l.link_type + l.peer}
             linkType={l.link_type}
             peer={l.peer}
+            labels={labels}
             onSelect={onSelect}
           />
         ))}
@@ -107,28 +123,37 @@ function PanelSection({
   );
 }
 
-/** One row with a link-type label and a clickable peer id. */
+/** One row with a link-type label and a clickable peer label + id. */
 function LinkRow({
   linkType,
   peer,
+  labels,
   onSelect,
 }: {
   linkType: string;
   peer: string;
+  labels: Record<string, string>;
   onSelect: (id: string) => void;
 }) {
   // Block-scoped target like "paper:abc#b3" — navigate to the parent,
   // since we don't open block files directly yet.
   const parent = peer.split("#")[0];
+  const label = labels[parent] ?? parent;
+  const blockSuffix = peer.includes("#") ? peer.slice(peer.indexOf("#")) : "";
+  const showingFallback = label === parent;
   return (
     <div className="link-row">
       <span className="link-type">{linkType}</span>
       <button
-        className="peer-id"
+        className="peer"
         onClick={() => onSelect(parent)}
         title={peer}
       >
-        {peer}
+        <span className="peer-label">
+          {label}
+          {blockSuffix && <span className="peer-block">{blockSuffix}</span>}
+        </span>
+        {!showingFallback && <span className="peer-id-sub">{parent}</span>}
       </button>
     </div>
   );
@@ -136,14 +161,19 @@ function LinkRow({
 
 function NodeRow({
   peer,
+  labels,
   onSelect,
 }: {
   peer: string;
+  labels: Record<string, string>;
   onSelect: (id: string) => void;
 }) {
+  const label = labels[peer] ?? peer;
+  const showingFallback = label === peer;
   return (
-    <button className="peer-id row" onClick={() => onSelect(peer)} title={peer}>
-      {peer}
+    <button className="peer row" onClick={() => onSelect(peer)} title={peer}>
+      <span className="peer-label">{label}</span>
+      {!showingFallback && <span className="peer-id-sub">{peer}</span>}
     </button>
   );
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, TypeInfo } from "../api";
+import { useNodeLabels } from "../hooks/useNodeLabels";
 
 type Props = {
   currentId: string;
@@ -16,8 +17,8 @@ type Expanded = Record<string, boolean>;
  * Left column. Shows types as a tree; each type expands to its nodes.
  * A search box filters visible node ids across all expanded types.
  *
- * Data comes entirely from memex-fs via /types/ — no local state about
- * what nodes exist. Refresh by bumping refreshKey.
+ * Node rows display a human-derived label with the raw id as secondary
+ * text, so users see "Alice" instead of "person:alice-9f8a2b".
  */
 export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
   const [types, setTypes] = useState<TypeInfo[]>([]);
@@ -58,8 +59,17 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
     }
   };
 
-  // Flat list of visible ids (for filter matching) — computed on every
-  // render but cheap since it's just string membership checks.
+  // Gather every currently-visible id for a single batch label fetch.
+  const visibleIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const [type, rows] of Object.entries(nodesByType)) {
+      if (expanded[type]) ids.push(...rows);
+    }
+    return ids;
+  }, [nodesByType, expanded]);
+
+  const labels = useNodeLabels(visibleIds, refreshKey);
+
   const filterLower = filter.trim().toLowerCase();
   const filteredNodes = useMemo(() => {
     const out: Record<string, string[]> = {};
@@ -68,11 +78,18 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
         out[type] = ids;
         continue;
       }
-      const matches = ids.filter((id) => id.toLowerCase().includes(filterLower));
+      // Filter on both the label and the raw id so either can find a node.
+      const matches = ids.filter((id) => {
+        const label = labels[id] ?? id;
+        return (
+          id.toLowerCase().includes(filterLower) ||
+          label.toLowerCase().includes(filterLower)
+        );
+      });
       if (matches.length > 0) out[type] = matches;
     }
     return out;
-  }, [nodesByType, filterLower]);
+  }, [nodesByType, filterLower, labels]);
 
   return (
     <aside className="sidebar">
@@ -82,7 +99,7 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
       <div className="sidebar-search">
         <input
           type="search"
-          placeholder="Filter nodes…"
+          placeholder="Filter…"
           value={filter}
           onChange={(e) => setFilter(e.currentTarget.value)}
         />
@@ -112,17 +129,24 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
                   {hiddenByFilter && (
                     <li className="muted empty-filter">no matches</li>
                   )}
-                  {visible.map((id) => (
-                    <li key={id}>
-                      <button
-                        className={`node-item ${id === currentId ? "active" : ""}`}
-                        onClick={() => onSelect(id)}
-                        title={id}
-                      >
-                        {id}
-                      </button>
-                    </li>
-                  ))}
+                  {visible.map((id) => {
+                    const label = labels[id] ?? id;
+                    const showingFallback = label === id;
+                    return (
+                      <li key={id}>
+                        <button
+                          className={`node-item ${id === currentId ? "active" : ""}`}
+                          onClick={() => onSelect(id)}
+                          title={id}
+                        >
+                          <span className="node-label">{label}</span>
+                          {!showingFallback && (
+                            <span className="node-id-sub">{id}</span>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>

@@ -34,6 +34,14 @@ export const api = {
 
   readNodeType: (id: string): Promise<string> => invoke("read_node_type", { id }),
 
+  /**
+   * Batch-derive human-meaningful labels for a list of ids. The backend
+   * falls back through meta.title > first line of content > humanized
+   * id, so every id in the return map is guaranteed to have a label.
+   */
+  readNodeLabels: (ids: string[]): Promise<Record<string, string>> =>
+    invoke("read_node_labels", { ids }),
+
   listTypes: (): Promise<TypeInfo[]> => invoke("list_types"),
 
   listNodesByType: (typeName: string): Promise<string[]> =>

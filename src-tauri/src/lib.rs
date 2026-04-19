@@ -5,12 +5,14 @@
 //! in the mount. This module does just enough to bridge JS to file I/O.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Local;
+use chrono::{Local, NaiveDate};
 use serde::Serialize;
+use serde_json::Value;
 
 /// Resolve the mount point. $MEMEX_MOUNT wins; otherwise ~/.memex/mount.
 fn mount_path() -> PathBuf {
@@ -219,6 +221,89 @@ fn read_neighbors(id: String) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Read meta.json for a node. Returns None if the file is missing or
+/// malformed — label derivation treats that as "no meta."
+fn read_meta(mount: &Path, id: &str) -> Option<HashMap<String, Value>> {
+    let path = node_dir(mount, id).join("meta.json");
+    let raw = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Derive a human-meaningful label for a node id. Order of preference:
+///   1. meta.json title/name/label field (author-authored),
+///   2. first non-blank line of content (heuristic),
+///   3. humanized id (strip type prefix, pretty-format dates, truncate
+///      long hex suffixes).
+/// Always returns something non-empty, so the UI never has to decide
+/// what to render when a node has no author-given name yet.
+fn derive_label(mount: &Path, id: &str) -> String {
+    if let Some(meta) = read_meta(mount, id) {
+        for key in ["title", "name", "label"] {
+            if let Some(v) = meta.get(key).and_then(Value::as_str) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+    if let Ok(content) = fs::read_to_string(node_dir(mount, id).join("content")) {
+        for raw_line in content.lines() {
+            let stripped = raw_line.trim().trim_start_matches('#').trim();
+            if !stripped.is_empty() {
+                return truncate_label(stripped, 60);
+            }
+        }
+    }
+    humanize_id(id)
+}
+
+fn truncate_label(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        s.to_string()
+    } else {
+        let head: String = chars.iter().take(max_chars).collect();
+        format!("{}…", head)
+    }
+}
+
+/// Turn an id like "person:alice" into "alice"; "daily:2026-04-19" into
+/// "April 19, 2026"; "sha256:abcdef01234..." into "sha256:abcdef01…".
+fn humanize_id(id: &str) -> String {
+    let (typ, rest) = match id.find(':') {
+        Some(i) => (&id[..i], &id[i + 1..]),
+        None => return id.to_string(),
+    };
+    if typ.eq_ignore_ascii_case("daily") {
+        if let Ok(d) = NaiveDate::parse_from_str(rest, "%Y-%m-%d") {
+            return d.format("%B %-d, %Y").to_string();
+        }
+    }
+    // Long hex identifiers get truncated so they don't crowd the UI.
+    if rest.len() > 16 && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return format!("{}:{}…", typ, &rest[..8]);
+    }
+    rest.to_string()
+}
+
+/// Batch-derive labels. Unknown ids get mapped to humanize_id(id) so the
+/// UI always has something to render.
+#[tauri::command]
+fn read_node_labels(ids: Vec<String>) -> Result<HashMap<String, String>, String> {
+    let mount = require_mount()?;
+    let mut out = HashMap::with_capacity(ids.len());
+    for id in ids {
+        if validate_node_id(&id).is_err() {
+            out.insert(id.clone(), humanize_id(&id));
+            continue;
+        }
+        let label = derive_label(&mount, &id);
+        out.insert(id, label);
+    }
+    Ok(out)
+}
+
 /// Lightweight status for the frontend to show "mount not found" instead
 /// of crashing every invocation.
 #[derive(Serialize)]
@@ -245,6 +330,7 @@ pub fn run() {
             write_node,
             today_note_id,
             read_node_type,
+            read_node_labels,
             list_types,
             list_nodes_by_type,
             read_outgoing_links,

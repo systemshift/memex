@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useNodeLabels } from "../hooks/useNodeLabels";
 
 type Props = {
   nodeId: string;
@@ -10,12 +11,13 @@ type Props = {
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 /**
- * Center column. Shows the current node's id + content. Editor is a raw
- * textarea for now — a block editor (BlockNote/Tiptap) is a later pass.
+ * Center column. Shows the current node's label (with id as secondary
+ * text) plus type, and the content as a textarea. A block editor
+ * (BlockNote/Tiptap) with [[ref]] autocomplete replaces this in a
+ * later pass.
  *
- * Autosaves on a 800ms debounce while typing and immediately on blur.
- * Saves trigger onSaved so the right panel can re-fetch links/neighbors
- * once the graph sees the new content (and any [[refs]] inside it).
+ * Autosaves on an 800ms debounce while typing and immediately on blur.
+ * onSaved triggers a parent refresh so side panels pick up new [[refs]].
  */
 export function Editor({ nodeId, onSaved }: Props) {
   const [content, setContent] = useState("");
@@ -24,6 +26,10 @@ export function Editor({ nodeId, onSaved }: Props) {
   const [save, setSave] = useState<SaveState>("idle");
   const timer = useRef<number | null>(null);
   const loadedForId = useRef<string>("");
+  const [labelBump, setLabelBump] = useState(0);
+  const labels = useNodeLabels([nodeId], labelBump);
+  const label = labels[nodeId] ?? nodeId;
+  const showIdSub = label !== nodeId;
 
   // Load content whenever the selected node changes.
   useEffect(() => {
@@ -53,6 +59,8 @@ export function Editor({ nodeId, onSaved }: Props) {
     try {
       await api.writeNode(nodeId, text);
       setSave("saved");
+      // A new first line likely means a new label — force a relabel.
+      setLabelBump((b) => b + 1);
       onSaved?.();
     } catch (e) {
       setSave("error");
@@ -72,8 +80,6 @@ export function Editor({ nodeId, onSaved }: Props) {
       window.clearTimeout(timer.current);
       timer.current = null;
     }
-    // Only save if we've loaded into this node — prevents an immediate
-    // blur from persisting "" over a node we haven't read yet.
     if (loadedForId.current === nodeId) commit(content);
   };
 
@@ -81,8 +87,9 @@ export function Editor({ nodeId, onSaved }: Props) {
     <section className="editor-pane">
       <header className="editor-header">
         <div className="editor-title">
-          <span className="node-id">{nodeId}</span>
+          <span className="editor-label" title={nodeId}>{label}</span>
           {typeName && <span className="node-type-pill">{typeName}</span>}
+          {showIdSub && <span className="editor-id-sub">{nodeId}</span>}
         </div>
         <div className={`save-indicator ${save}`}>
           {save === "saving" && "saving…"}
