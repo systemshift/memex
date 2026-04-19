@@ -164,6 +164,31 @@ fn read_link_entries(dir: &Path) -> Result<Vec<LinkInfo>, String> {
     Ok(out)
 }
 
+/// Search the mount via memex-fs's `/search/{query}/` view. Returns the
+/// ordered list of matching node IDs. Whitespace in the query is fine —
+/// memex-fs tokenizes it the same way it indexed the content.
+#[tauri::command]
+fn search_nodes(query: String) -> Result<Vec<String>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if trimmed.contains('/') || trimmed.contains("..") {
+        return Err("invalid search query".into());
+    }
+    let mount = require_mount()?;
+    let dir = mount.join("search").join(trimmed);
+    let entries = match fs::read_dir(&dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read {}: {}", dir.display(), e)),
+    };
+    Ok(entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect())
+}
+
 #[tauri::command]
 fn read_neighbors(id: String) -> Result<Vec<String>, String> {
     validate_node_id(&id)?;
@@ -324,6 +349,7 @@ pub fn run() {
             read_outgoing_links,
             read_backlinks,
             read_neighbors,
+            search_nodes,
             mount_status,
             compile_node_context,
             ask_stream,

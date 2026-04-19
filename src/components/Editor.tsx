@@ -1,29 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useNodeLabels } from "../hooks/useNodeLabels";
+import { typeIcon } from "../icons";
 
 type Props = {
   nodeId: string;
   /** Called after a successful save so the parent can refresh side panels. */
   onSaved?: () => void;
+  /** Reports content length to the status bar for word count. */
+  onContentChange?: (content: string) => void;
 };
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 /**
- * Center column. Shows the current node's label (with id as secondary
- * text) plus type, and the content as a textarea. A block editor
- * (BlockNote/Tiptap) with [[ref]] autocomplete replaces this in a
- * later pass.
- *
- * Autosaves on an 800ms debounce while typing and immediately on blur.
- * onSaved triggers a parent refresh so side panels pick up new [[refs]].
+ * Center column. Shows the current node's label + type, and its
+ * content as a textarea. Autosave: 800ms debounce on typing, immediate
+ * on blur. A block editor (BlockNote/Tiptap) with [[ref]] autocomplete
+ * replaces this in a later pass.
  */
-export function Editor({ nodeId, onSaved }: Props) {
+export function Editor({ nodeId, onSaved, onContentChange }: Props) {
   const [content, setContent] = useState("");
   const [typeName, setTypeName] = useState<string>("");
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [save, setSave] = useState<SaveState>("idle");
   const timer = useRef<number | null>(null);
   const loadedForId = useRef<string>("");
   const [labelBump, setLabelBump] = useState(0);
@@ -31,7 +30,6 @@ export function Editor({ nodeId, onSaved }: Props) {
   const label = labels[nodeId] ?? nodeId;
   const showIdSub = label !== nodeId;
 
-  // Load content whenever the selected node changes.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -45,6 +43,7 @@ export function Editor({ nodeId, onSaved }: Props) {
         setContent(text);
         setTypeName(type_);
         loadedForId.current = nodeId;
+        onContentChange?.(text);
       } catch (e) {
         if (!cancelled) setLoadError(String(e));
       }
@@ -55,22 +54,18 @@ export function Editor({ nodeId, onSaved }: Props) {
   }, [nodeId]);
 
   const commit = async (text: string) => {
-    setSave("saving");
     try {
       await api.writeNode(nodeId, text);
-      setSave("saved");
-      // A new first line likely means a new label — force a relabel.
       setLabelBump((b) => b + 1);
       onSaved?.();
     } catch (e) {
-      setSave("error");
       setLoadError(String(e));
     }
   };
 
   const onChange = (text: string) => {
     setContent(text);
-    setSave("idle");
+    onContentChange?.(text);
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => commit(text), 800);
   };
@@ -83,18 +78,16 @@ export function Editor({ nodeId, onSaved }: Props) {
     if (loadedForId.current === nodeId) commit(content);
   };
 
+  const Icon = typeIcon(typeName);
+
   return (
     <section className="editor-pane">
       <header className="editor-header">
         <div className="editor-title">
+          <Icon size={16} className="editor-type-icon" />
           <span className="editor-label" title={nodeId}>{label}</span>
           {typeName && <span className="node-type-pill">{typeName}</span>}
           {showIdSub && <span className="editor-id-sub">{nodeId}</span>}
-        </div>
-        <div className={`save-indicator ${save}`}>
-          {save === "saving" && "saving…"}
-          {save === "saved" && "saved"}
-          {save === "error" && "save failed"}
         </div>
       </header>
 
@@ -105,9 +98,13 @@ export function Editor({ nodeId, onSaved }: Props) {
         value={content}
         onChange={(e) => onChange(e.currentTarget.value)}
         onBlur={onBlur}
-        placeholder="Scribble here…"
+        placeholder="Scribble here. Use [[type:id]] to link to another node."
         spellCheck
       />
     </section>
   );
 }
+
+// Saving state is now surfaced by the global StatusBar; this re-export
+// lets the parent wire the indicator. Editor still reports via onSaved.
+export type EditorSaveState = SaveState;

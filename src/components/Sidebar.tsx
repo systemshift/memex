@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, TypeInfo } from "../api";
 import { useNodeLabels } from "../hooks/useNodeLabels";
+import { typeIcon, ChevronDown, ChevronRightSmall, Plus, Search as SearchIcon } from "../icons";
 
 type Props = {
   currentId: string;
   onSelect: (id: string) => void;
-  /** Bumped by the parent when anything structural changes so the sidebar
-   *  re-queries memex-fs (new nodes created, etc.). */
+  /** Bumped by the parent when structural changes happen (new node,
+   *  save with new refs, etc.). */
   refreshKey: number;
   onNewNode: () => void;
 };
@@ -14,11 +15,8 @@ type Props = {
 type Expanded = Record<string, boolean>;
 
 /**
- * Left column. Shows types as a tree; each type expands to its nodes.
- * A search box filters visible node ids across all expanded types.
- *
- * Node rows display a human-derived label with the raw id as secondary
- * text, so users see "Alice" instead of "person:alice-9f8a2b".
+ * Left column with the type tree. Each type expands to its nodes;
+ * rows show the human label with the raw id below in small mono.
  */
 export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
   const [types, setTypes] = useState<TypeInfo[]>([]);
@@ -32,7 +30,6 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
       try {
         const t = await api.listTypes();
         setTypes(t);
-        // Auto-expand the type of the current node so it's visible on load.
         if (currentId) {
           const currentType = await api.readNodeType(currentId);
           if (currentType) {
@@ -45,7 +42,6 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
     })();
   }, [refreshKey]);
 
-  // Lazy-load nodes for a type the first time it's expanded.
   const toggleExpand = async (name: string) => {
     const next = !expanded[name];
     setExpanded((prev) => ({ ...prev, [name]: next }));
@@ -59,7 +55,6 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
     }
   };
 
-  // Gather every currently-visible id for a single batch label fetch.
   const visibleIds = useMemo(() => {
     const ids: string[] = [];
     for (const [type, rows] of Object.entries(nodesByType)) {
@@ -78,7 +73,6 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
         out[type] = ids;
         continue;
       }
-      // Filter on both the label and the raw id so either can find a node.
       const matches = ids.filter((id) => {
         const label = labels[id] ?? id;
         return (
@@ -94,9 +88,12 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
-        <button className="btn-primary" onClick={onNewNode}>+ New node</button>
+        <button className="btn-primary sidebar-new" onClick={onNewNode}>
+          <Plus size={14} /> <span>New node</span>
+        </button>
       </div>
       <div className="sidebar-search">
+        <SearchIcon size={13} className="sidebar-search-icon" />
         <input
           type="search"
           placeholder="Filter…"
@@ -107,20 +104,28 @@ export function Sidebar({ currentId, onSelect, refreshKey, onNewNode }: Props) {
       {error && <p className="error sidebar-error">{error}</p>}
       <nav className="type-tree">
         {types.length === 0 && (
-          <p className="muted empty">No nodes yet. Create one to start.</p>
+          <div className="empty-state">
+            <p>No nodes yet.</p>
+            <p className="muted">Press ⌘N to start one.</p>
+          </div>
         )}
         {types.map((t) => {
           const isOpen = !!expanded[t.name];
           const visible = isOpen ? filteredNodes[t.name] ?? [] : [];
           const hiddenByFilter =
-            isOpen && filterLower && (nodesByType[t.name] ?? []).length > 0 && visible.length === 0;
+            isOpen &&
+            filterLower &&
+            (nodesByType[t.name] ?? []).length > 0 &&
+            visible.length === 0;
+          const Icon = typeIcon(t.name);
           return (
             <div key={t.name} className="type-section">
               <button
                 className={`type-header ${isOpen ? "open" : ""}`}
                 onClick={() => toggleExpand(t.name)}
               >
-                <span className="chevron">{isOpen ? "▾" : "▸"}</span>
+                {isOpen ? <ChevronDown size={13} className="chevron" /> : <ChevronRightSmall size={13} className="chevron" />}
+                <Icon size={14} className="type-icon" />
                 <span className="type-name">{t.name}</span>
                 <span className="type-count">{t.count}</span>
               </button>

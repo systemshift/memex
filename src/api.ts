@@ -56,6 +56,11 @@ export const api = {
   readNeighbors: (id: string): Promise<string[]> =>
     invoke("read_neighbors", { id }),
 
+  /** Keyword search via memex-fs's /search/{query}/ view. Order returned
+   *  is memex-fs's ranking (currently term-match count). */
+  searchNodes: (query: string): Promise<string[]> =>
+    invoke("search_nodes", { query }),
+
   /** Build the Markdown context block for a node, without sending it
    *  to the LLM. Used for the "show context" toggle so users can see
    *  exactly what the assistant was given. */
