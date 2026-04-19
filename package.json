@@ -1,31 +1,26 @@
 {
-  "name": "memex-graph",
-  "version": "0.2.0",
-  "description": "Personal knowledge graph with decentralized identity",
+  "name": "memex",
+  "private": true,
+  "version": "0.3.0",
   "type": "module",
-  "main": "src/index.tsx",
   "scripts": {
-    "start": "bun run src/index.tsx",
-    "build": "bun build src/index.tsx --compile --outfile=memex",
-    "build:linux-x64": "bun build src/index.tsx --compile --target=bun-linux-x64 --outfile=memex-linux-x64",
-    "build:linux-arm64": "bun build src/index.tsx --compile --target=bun-linux-arm64 --outfile=memex-linux-arm64",
-    "build:darwin-x64": "bun build src/index.tsx --compile --target=bun-darwin-x64 --outfile=memex-darwin-x64",
-    "build:darwin-arm64": "bun build src/index.tsx --compile --target=bun-darwin-arm64 --outfile=memex-darwin-arm64"
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
   },
   "dependencies": {
-    "@noble/ed25519": "^2.2.3",
-    "@noble/hashes": "^1.7.1",
-    "bs58": "^6.0.0",
-    "imapflow": "^1.2.9",
-    "ink": "^5.1.0",
-    "ink-text-input": "^6.0.0",
-    "openai": "^5.1.0",
-    "react": "^18.3.1",
-    "react-devtools-core": "^7.0.1"
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {
-    "bun-types": "^1.2.4",
-    "@types/react": "^18.3.18",
-    "typescript": "^5.7.3"
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "@tauri-apps/cli": "^2"
   }
 }

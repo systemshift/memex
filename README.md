@@ -1,88 +1,66 @@
-# Memex
+# memex
 
-AI-native knowledge graph + decentralized social network. Single binary, no runtime dependencies.
+A desktop app for the memex-fs knowledge graph.
 
-## Install
+## Status
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/systemshift/memex/main/install.sh | sh
+**v0.3 — rewrite in progress.** The previous chat-TUI CLI (Bun/TypeScript,
+versions 0.1.x–0.2.x) has been retired in favor of a Tauri GUI. The git
+history preserves the old code if you want to dig.
+
+What's in this repo today:
+- Rust backend (`src-tauri/`) with a subcommand dispatcher for `mount`,
+  `push`, `pull`, `capture`, plus a Tauri entry point for the GUI.
+- React + TypeScript frontend (`src/`) — minimal: opens today's daily
+  note and autosaves as you type.
+
+It's the skeleton, not the product. Panels for backlinks, neighbors,
+time-travel, emergent clusters, and federation all land in later work.
+
+## Running
+
+You need the `memex-fs` binary on `PATH` (built from
+[memex-fs](https://github.com/systemshift/memex-fs)) and the mount
+already running:
+
+```sh
+memex-fs mount --data ~/.memex/data --mount ~/.memex/mount
 ```
 
-Or with Bun:
+Then in this repo:
 
-```bash
-bun install && bun run start
+```sh
+npm install
+npm run tauri dev
 ```
 
-## What happens
+## CLI subcommands
 
-- Downloads knowledge graph server + IPFS automatically
-- Creates your cryptographic identity (Ed25519 DID)
-- Guides you through your first interaction
+The Rust binary doubles as a CLI; no args launches the GUI.
 
-## What is this
-
-- **Knowledge graph** ([memex-server](https://github.com/systemshift/memex-server)): entities, relationships, raw sources — stored locally in SQLite
-- **Social network** ([dagit](https://github.com/systemshift/dagit)): IPFS-based, Ed25519-signed, no central servers
-- **LLM** (OpenAI): searches your graph, creates nodes, posts to dagit — all through natural language chat
-
-## Prerequisites
-
-- `OPENAI_API_KEY` environment variable set
-
-```bash
-export OPENAI_API_KEY=sk-...
+```sh
+memex                          # launch GUI
+memex capture                  # open today's daily note in $EDITOR
+memex mount --mount <path>     # delegates to memex-fs
+memex push [--publish]         # delegates to memex-fs
+memex pull <cid-or-did>        # delegates to memex-fs
+memex help
 ```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────┐
-│              memex TUI              │
-│           (Ink terminal)            │
-├─────────────┬───────────────────────┤
-│  OpenAI API │    function calls     │
-├─────────────┼───────────┬───────────┤
-│ memex-server│   dagit   │   IPFS    │
-│  (SQLite)   │  (Ed25519)│  (kubo)   │
-└─────────────┴───────────┴───────────┘
+memex (Tauri binary)
+├── Rust backend
+│   ├── subcommand dispatch (mount/push/pull/capture → memex-fs binary)
+│   └── Tauri commands: read_node, write_node, today_note_id, mount_status
+└── React frontend (webview)
+    └── minimal daily-note editor; panels land in subsequent commits
 ```
 
-## Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENAI_API_KEY` | (required) | OpenAI API key |
-| `OPENAI_MODEL` | `gpt-5.2` | LLM model to use |
-| `PORT` | `8080` | memex-server port |
-| `MEMEX_BACKEND` | `sqlite` | Storage backend (`sqlite` or `neo4j`) |
-| `SQLITE_PATH` | `~/.memex/memex.db` | Database path |
-| `MEMEX_SERVER` | (auto-detect) | Path to memex-server binary |
-
-## CLI Flags
-
-```
-memex [options]
-
-  --server-only     Start server without TUI
-  --port PORT       Server port (default: 8080)
-  --backend TYPE    sqlite or neo4j (default: sqlite)
-  --db-path PATH    SQLite database path
-  --skip-ipfs       Skip IPFS daemon setup
-  --skip-download   Don't auto-download binaries
-  -h, --help        Show help
-```
-
-## Build from source
-
-Requires [Bun](https://bun.sh).
-
-```bash
-bun install
-bun run build          # compile for current platform
-bun run build:linux-x64    # cross-compile
-```
+The actual graph, history, neighbors, and federation all live in
+memex-fs. This repo is just a front-end.
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+See [LICENSE](LICENSE).
