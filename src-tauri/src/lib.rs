@@ -4,6 +4,7 @@
 //! The GUI is a thin renderer over the filesystem — all real state lives
 //! in the mount. This module does just enough to bridge JS to file I/O.
 
+use std::cmp::Ordering;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,142 @@ fn today_note_id() -> String {
     format!("daily:{}", Local::now().format("%Y-%m-%d"))
 }
 
+/// Read the type string of a node (from /nodes/{id}/type). Returns empty
+/// string if the node has no type or the file is missing.
+#[tauri::command]
+fn read_node_type(id: String) -> Result<String, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    let path = node_dir(&mount, &id).join("type");
+    match fs::read_to_string(&path) {
+        Ok(s) => Ok(s.trim().to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read {}: {}", path.display(), e)),
+    }
+}
+
+#[derive(Serialize)]
+struct TypeInfo {
+    name: String,
+    count: usize,
+}
+
+/// List all types on the mount with node counts. Reads /types/ directly,
+/// each subdirectory is a Type.
+#[tauri::command]
+fn list_types() -> Result<Vec<TypeInfo>, String> {
+    let mount = require_mount()?;
+    let types_dir = mount.join("types");
+    let mut types = Vec::new();
+    let entries = fs::read_dir(&types_dir)
+        .map_err(|e| format!("read {}: {}", types_dir.display(), e))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let count = fs::read_dir(entry.path())
+            .map(|it| it.count())
+            .unwrap_or(0);
+        types.push(TypeInfo { name, count });
+    }
+    types.sort_by(|a, b| match b.count.cmp(&a.count) {
+        Ordering::Equal => a.name.cmp(&b.name),
+        other => other,
+    });
+    Ok(types)
+}
+
+/// List node IDs of a given type by reading /types/{type}/.
+#[tauri::command]
+fn list_nodes_by_type(type_name: String) -> Result<Vec<String>, String> {
+    if type_name.contains('/') || type_name.contains("..") {
+        return Err(format!("invalid type name: {}", type_name));
+    }
+    let mount = require_mount()?;
+    let dir = mount.join("types").join(&type_name);
+    let entries = fs::read_dir(&dir).map_err(|e| format!("read {}: {}", dir.display(), e))?;
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    // Daily notes and time-based ids sort best in reverse-lexicographic
+    // so the newest is on top; for everything else, plain alphabetical.
+    if type_name.eq_ignore_ascii_case("daily") {
+        ids.sort_by(|a, b| b.cmp(a));
+    } else {
+        ids.sort();
+    }
+    Ok(ids)
+}
+
+#[derive(Serialize)]
+struct LinkInfo {
+    /// The other end of the link (the target when reading outgoing,
+    /// the source when reading backlinks).
+    peer: String,
+    /// The relationship label the author attached (e.g. "cites", "knows").
+    link_type: String,
+}
+
+/// Parse the FUSE-level link entry name "type:peer-id" into its pieces.
+/// Entry names use the first colon as the delimiter; the peer id itself
+/// may contain colons and # suffixes.
+fn parse_link_entry(name: &str) -> Option<(String, String)> {
+    let idx = name.find(':')?;
+    Some((name[..idx].to_string(), name[idx + 1..].to_string()))
+}
+
+/// Read outgoing links of a node from /nodes/{id}/links/.
+#[tauri::command]
+fn read_outgoing_links(id: String) -> Result<Vec<LinkInfo>, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    let dir = node_dir(&mount, &id).join("links");
+    read_link_entries(&dir)
+}
+
+/// Read incoming links of a node from /nodes/{id}/backlinks/.
+#[tauri::command]
+fn read_backlinks(id: String) -> Result<Vec<LinkInfo>, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    let dir = node_dir(&mount, &id).join("backlinks");
+    read_link_entries(&dir)
+}
+
+fn read_link_entries(dir: &Path) -> Result<Vec<LinkInfo>, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read {}: {}", dir.display(), e)),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some((link_type, peer)) = parse_link_entry(&name) {
+            out.push(LinkInfo { peer, link_type });
+        }
+    }
+    out.sort_by(|a, b| a.peer.cmp(&b.peer));
+    Ok(out)
+}
+
+/// Read the ranked neighbors of a node from /nodes/{id}/neighbors/. The
+/// order returned by memex-fs IS the ranking — don't re-sort.
+#[tauri::command]
+fn read_neighbors(id: String) -> Result<Vec<String>, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    let dir = node_dir(&mount, &id).join("neighbors");
+    let entries = match fs::read_dir(&dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read {}: {}", dir.display(), e)),
+    };
+    Ok(entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect())
+}
+
 /// Lightweight status for the frontend to show "mount not found" instead
 /// of crashing every invocation.
 #[derive(Serialize)]
@@ -107,6 +244,12 @@ pub fn run() {
             read_node,
             write_node,
             today_note_id,
+            read_node_type,
+            list_types,
+            list_nodes_by_type,
+            read_outgoing_links,
+            read_backlinks,
+            read_neighbors,
             mount_status,
         ])
         .run(tauri::generate_context!())

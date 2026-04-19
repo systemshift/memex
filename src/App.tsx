@@ -1,125 +1,110 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useState } from "react";
+import { api, MountStatus } from "./api";
+import { Sidebar } from "./components/Sidebar";
+import { Editor } from "./components/Editor";
+import { RightPanel } from "./components/RightPanel";
 import "./App.css";
 
-type MountStatus = {
-  path: string;
-  mounted: boolean;
-};
-
 /**
- * v0.3 shell: opens today's daily note, edits it, saves on blur + on a
- * debounced timer while typing. Everything else — backlinks, neighbors,
- * time travel, federation — layers on top of this in subsequent work.
+ * Top-level shell. Holds the currently-selected node id and a "refresh
+ * token" that child panels watch to re-query memex-fs when graph-
+ * shaped state changes (new node created, content saved with new refs,
+ * etc.). Data itself lives entirely on the mount; this component owns
+ * only the selection and the refresh cadence.
  */
-function App() {
-  const [nodeId, setNodeId] = useState<string>("");
-  const [content, setContent] = useState<string>("");
-  const [status, setStatus] = useState<MountStatus | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const saveTimer = useRef<number | null>(null);
+export default function App() {
+  const [mount, setMount] = useState<MountStatus | null>(null);
+  const [currentId, setCurrentId] = useState<string>("");
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [bootError, setBootError] = useState<string | null>(null);
 
-  // On launch: check mount, resolve today's id, read its content.
   useEffect(() => {
     (async () => {
-      const s = await invoke<MountStatus>("mount_status");
-      setStatus(s);
-      if (!s.mounted) return;
-
-      const id = await invoke<string>("today_note_id");
-      setNodeId(id);
-
+      const m = await api.mountStatus();
+      setMount(m);
+      if (!m.mounted) return;
       try {
-        const text = await invoke<string>("read_node", { id });
-        setContent(text);
+        const id = await api.todayNoteId();
+        // Touch today's note so it exists and shows up in /types/Daily/.
+        // write_node is idempotent; a blank write creates the dir.
+        try {
+          await api.readNode(id);
+        } catch {
+          // ignore; writeNode will create.
+        }
+        await api.writeNode(id, await api.readNode(id));
+        setCurrentId(id);
       } catch (e) {
-        setLoadError(String(e));
+        setBootError(String(e));
       }
     })();
   }, []);
 
-  const save = useCallback(async (id: string, text: string) => {
-    setSaveState("saving");
-    try {
-      await invoke("write_node", { id, content: text });
-      setSaveState("saved");
-    } catch (e) {
-      setSaveState("error");
-      setLoadError(String(e));
-    }
-  }, []);
+  const bump = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  // Debounced autosave: 800ms after last keystroke.
-  const onChange = (text: string) => {
-    setContent(text);
-    setSaveState("idle");
-    if (saveTimer.current !== null) {
-      window.clearTimeout(saveTimer.current);
+  const onNewNode = useCallback(() => {
+    const raw = window.prompt(
+      "New node id (format: type:identifier, e.g. note:first-draft)",
+    );
+    if (!raw) return;
+    const id = raw.trim();
+    if (!id || id.includes("/") || id.includes("..")) {
+      window.alert(`Invalid id: ${id}`);
+      return;
     }
-    saveTimer.current = window.setTimeout(() => {
-      if (nodeId) save(nodeId, text);
-    }, 800);
-  };
+    api
+      .writeNode(id, "")
+      .then(() => {
+        setCurrentId(id);
+        bump();
+      })
+      .catch((e) => window.alert(`Create failed: ${e}`));
+  }, [bump]);
 
-  // Save immediately on blur so the file is durable when the user clicks away.
-  const onBlur = () => {
-    if (saveTimer.current !== null) {
-      window.clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
-    if (nodeId) save(nodeId, content);
-  };
-
-  if (status && !status.mounted) {
+  if (mount && !mount.mounted) {
     return (
-      <main className="container mount-missing">
+      <main className="layout-unmounted">
         <h1>memex-fs isn't mounted</h1>
-        <p>Expected at: <code>{status.path}</code></p>
         <p>
-          Start it with:<br />
-          <code>memex mount --data ~/.memex/data --mount {status.path}</code>
+          Expected at: <code>{mount.path}</code>
+        </p>
+        <p>
+          Start it with:
+          <br />
+          <code>
+            memex-fs mount --data ~/.memex/data --mount {mount.path}
+          </code>
         </p>
       </main>
     );
   }
 
-  if (!nodeId) {
+  if (!mount || !currentId) {
     return (
-      <main className="container">
-        <p className="muted">Loading…</p>
+      <main className="layout-loading">
+        <p className="muted">{bootError ?? "Loading…"}</p>
       </main>
     );
   }
 
   return (
-    <main className="container">
-      <header className="toolbar">
-        <div className="title">
-          <span className="id">{nodeId}</span>
-        </div>
-        <div className={`save-indicator ${saveState}`}>
-          {saveState === "saving" && "saving…"}
-          {saveState === "saved" && "saved"}
-          {saveState === "error" && "save failed"}
-        </div>
-      </header>
-
-      {loadError && (
-        <p className="error" role="alert">{loadError}</p>
-      )}
-
-      <textarea
-        className="editor"
-        value={content}
-        onChange={(e) => onChange(e.currentTarget.value)}
-        onBlur={onBlur}
-        spellCheck={true}
-        placeholder="Scribble for today…"
-        autoFocus
+    <div className="layout">
+      <Sidebar
+        currentId={currentId}
+        onSelect={setCurrentId}
+        refreshKey={refreshKey}
+        onNewNode={onNewNode}
       />
-    </main>
+      <Editor
+        key={currentId}
+        nodeId={currentId}
+        onSaved={bump}
+      />
+      <RightPanel
+        nodeId={currentId}
+        refreshKey={refreshKey}
+        onSelect={setCurrentId}
+      />
+    </div>
   );
 }
-
-export default App;
