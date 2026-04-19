@@ -1,26 +1,66 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, LinkInfo } from "../api";
 import { useNodeLabels } from "../hooks/useNodeLabels";
+import { ChatPanel } from "./ChatPanel";
 
 type Props = {
   nodeId: string;
-  /** Bumped by the parent whenever the current node's data changes
-   *  (e.g. after a save that might have created [[refs]]). */
+  /** Bumped by the parent whenever the current node's data changes. */
   refreshKey: number;
   onSelect: (id: string) => void;
 };
 
+type Tab = "graph" | "chat";
+
 /**
- * Right column. Three sections:
- *   - Backlinks: who points at this node (bubbled up from block-scoped
- *     targets too, memex-fs handles that in its reverse-index).
- *   - Neighbors: ranked multi-signal relevance from memex-fs.
- *   - Outgoing links: what this node points at, by link type.
+ * Right column with two tabs:
+ *   - Graph: backlinks, ranked neighbors, outgoing links. All clickable.
+ *   - Chat:  ask a question about the current node. The LLM gets a
+ *            compiled context block automatically — no hand-pasting.
  *
- * Each peer is rendered with a human label (meta.title, first line of
- * content, or humanized id) — the raw id is still accessible on hover.
+ * Tab selection persists across node switches within a session; if
+ * you wanted chat open on this node, you probably want it open on
+ * the next one too.
  */
 export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
+  const [tab, setTab] = useState<Tab>("graph");
+
+  return (
+    <aside className="right-panel">
+      <div className="right-tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={tab === "graph"}
+          className={`right-tab ${tab === "graph" ? "active" : ""}`}
+          onClick={() => setTab("graph")}
+        >
+          Graph
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "chat"}
+          className={`right-tab ${tab === "chat" ? "active" : ""}`}
+          onClick={() => setTab("chat")}
+        >
+          Chat
+        </button>
+      </div>
+      {tab === "graph" ? (
+        <GraphTab
+          nodeId={nodeId}
+          refreshKey={refreshKey}
+          onSelect={onSelect}
+        />
+      ) : (
+        <ChatPanel key={nodeId} nodeId={nodeId} />
+      )}
+    </aside>
+  );
+}
+
+/** Backlinks + Neighbors + Outgoing. Extracted so the tab container
+ *  doesn't have to juggle three queries just to render a panel. */
+function GraphTab({ nodeId, refreshKey, onSelect }: Props) {
   const [backlinks, setBacklinks] = useState<LinkInfo[]>([]);
   const [neighbors, setNeighbors] = useState<string[]>([]);
   const [outgoing, setOutgoing] = useState<LinkInfo[]>([]);
@@ -49,8 +89,6 @@ export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
     };
   }, [nodeId, refreshKey]);
 
-  // Collect every peer id on display (dropping block suffixes so the
-  // parent's label is used) into a single batch label fetch.
   const allIds = useMemo(() => {
     const set = new Set<string>();
     backlinks.forEach((l) => set.add(l.peer.split("#")[0]));
@@ -62,7 +100,7 @@ export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
   const labels = useNodeLabels(allIds, refreshKey);
 
   return (
-    <aside className="right-panel">
+    <div className="graph-tab">
       {error && <p className="error">{error}</p>}
 
       <PanelSection title="Backlinks" count={backlinks.length}>
@@ -99,7 +137,7 @@ export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
           />
         ))}
       </PanelSection>
-    </aside>
+    </div>
   );
 }
 
@@ -123,7 +161,6 @@ function PanelSection({
   );
 }
 
-/** One row with a link-type label and a clickable peer label + id. */
 function LinkRow({
   linkType,
   peer,
@@ -135,8 +172,6 @@ function LinkRow({
   labels: Record<string, string>;
   onSelect: (id: string) => void;
 }) {
-  // Block-scoped target like "paper:abc#b3" — navigate to the parent,
-  // since we don't open block files directly yet.
   const parent = peer.split("#")[0];
   const label = labels[parent] ?? parent;
   const blockSuffix = peer.includes("#") ? peer.slice(peer.indexOf("#")) : "";
@@ -144,11 +179,7 @@ function LinkRow({
   return (
     <div className="link-row">
       <span className="link-type">{linkType}</span>
-      <button
-        className="peer"
-        onClick={() => onSelect(parent)}
-        title={peer}
-      >
+      <button className="peer" onClick={() => onSelect(parent)} title={peer}>
         <span className="peer-label">
           {label}
           {blockSuffix && <span className="peer-block">{blockSuffix}</span>}

@@ -55,4 +55,25 @@ export const api = {
 
   readNeighbors: (id: string): Promise<string[]> =>
     invoke("read_neighbors", { id }),
+
+  /** Build the Markdown context block for a node, without sending it
+   *  to the LLM. Used for the "show context" toggle so users can see
+   *  exactly what the assistant was given. */
+  compileNodeContext: (id: string): Promise<string> =>
+    invoke("compile_node_context", { id }),
+
+  /** Kick off a streaming chat. The return resolves as soon as the
+   *  request is in flight; actual tokens arrive via chat-chunk events,
+   *  termination via chat-done, errors via chat-error. */
+  askStream: (
+    nodeId: string,
+    history: ChatMessage[],
+    question: string,
+  ): Promise<void> =>
+    invoke("ask_stream", { nodeId, history, question }),
+};
+
+export type ChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
 };

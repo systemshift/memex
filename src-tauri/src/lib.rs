@@ -1,55 +1,30 @@
 //! Tauri backend for the memex GUI. Exposes a minimal set of commands the
-//! React frontend can invoke to read/write nodes on the memex-fs mount.
-//!
-//! The GUI is a thin renderer over the filesystem — all real state lives
-//! in the mount. This module does just enough to bridge JS to file I/O.
+//! React frontend can invoke to read/write nodes on the memex-fs mount,
+//! plus an `ask_stream` command that compiles graph context and streams
+//! an LLM response back via Tauri events.
+
+mod context;
+mod llm;
+mod mount;
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use chrono::{Local, NaiveDate};
+use chrono::Local;
 use serde::Serialize;
-use serde_json::Value;
+use tauri::AppHandle;
 
-/// Resolve the mount point. $MEMEX_MOUNT wins; otherwise ~/.memex/mount.
-fn mount_path() -> PathBuf {
-    if let Ok(m) = env::var("MEMEX_MOUNT") {
-        return PathBuf::from(m);
-    }
-    let home = env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".memex").join("mount")
-}
+use crate::llm::ChatMessage;
+use crate::mount::{
+    derive_label, humanize_id, mount_path, node_dir, require_mount, validate_node_id,
+};
 
-/// Validate that we're actually looking at a memex-fs mount by checking
-/// for the nodes/ directory. Anything else and we bail with a clear error.
-fn require_mount() -> Result<PathBuf, String> {
-    let mount = mount_path();
-    if !mount.join("nodes").is_dir() {
-        return Err(format!(
-            "memex-fs is not mounted at {}. Run `memex mount --mount {0}` first.",
-            mount.display()
-        ));
-    }
-    Ok(mount)
-}
+// ---------------------------------------------------------------
+// Node read / write
+// ---------------------------------------------------------------
 
-/// Guard against path traversal: node IDs must not contain / or ..
-fn validate_node_id(id: &str) -> Result<(), String> {
-    if id.is_empty() || id.contains('/') || id.contains("..") {
-        return Err(format!("invalid node id: {}", id));
-    }
-    Ok(())
-}
-
-fn node_dir(mount: &Path, id: &str) -> PathBuf {
-    mount.join("nodes").join(id)
-}
-
-/// Read a node's content. Returns empty string if the content file doesn't
-/// exist yet (a newly-created node has no content until first write).
 #[tauri::command]
 fn read_node(id: String) -> Result<String, String> {
     validate_node_id(&id)?;
@@ -62,9 +37,6 @@ fn read_node(id: String) -> Result<String, String> {
     }
 }
 
-/// Write a node's content, creating the node directory if it doesn't
-/// exist. mkdir on the FUSE mount triggers memex-fs to create the node
-/// with type inferred from the id prefix (e.g. daily: -> Daily).
 #[tauri::command]
 fn write_node(id: String, content: String) -> Result<(), String> {
     validate_node_id(&id)?;
@@ -78,15 +50,11 @@ fn write_node(id: String, content: String) -> Result<(), String> {
         .map_err(|e| format!("write {}: {}", content_path.display(), e))
 }
 
-/// Return today's daily note id (e.g. "daily:2026-04-19"). The frontend
-/// uses this on launch to open-on-today.
 #[tauri::command]
 fn today_note_id() -> String {
     format!("daily:{}", Local::now().format("%Y-%m-%d"))
 }
 
-/// Read the type string of a node (from /nodes/{id}/type). Returns empty
-/// string if the node has no type or the file is missing.
 #[tauri::command]
 fn read_node_type(id: String) -> Result<String, String> {
     validate_node_id(&id)?;
@@ -99,26 +67,26 @@ fn read_node_type(id: String) -> Result<String, String> {
     }
 }
 
+// ---------------------------------------------------------------
+// Types / listings
+// ---------------------------------------------------------------
+
 #[derive(Serialize)]
 struct TypeInfo {
     name: String,
     count: usize,
 }
 
-/// List all types on the mount with node counts. Reads /types/ directly,
-/// each subdirectory is a Type.
 #[tauri::command]
 fn list_types() -> Result<Vec<TypeInfo>, String> {
     let mount = require_mount()?;
     let types_dir = mount.join("types");
     let mut types = Vec::new();
-    let entries = fs::read_dir(&types_dir)
-        .map_err(|e| format!("read {}: {}", types_dir.display(), e))?;
+    let entries =
+        fs::read_dir(&types_dir).map_err(|e| format!("read {}: {}", types_dir.display(), e))?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let count = fs::read_dir(entry.path())
-            .map(|it| it.count())
-            .unwrap_or(0);
+        let count = fs::read_dir(entry.path()).map(|it| it.count()).unwrap_or(0);
         types.push(TypeInfo { name, count });
     }
     types.sort_by(|a, b| match b.count.cmp(&a.count) {
@@ -128,7 +96,6 @@ fn list_types() -> Result<Vec<TypeInfo>, String> {
     Ok(types)
 }
 
-/// List node IDs of a given type by reading /types/{type}/.
 #[tauri::command]
 fn list_nodes_by_type(type_name: String) -> Result<Vec<String>, String> {
     if type_name.contains('/') || type_name.contains("..") {
@@ -141,8 +108,6 @@ fn list_nodes_by_type(type_name: String) -> Result<Vec<String>, String> {
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    // Daily notes and time-based ids sort best in reverse-lexicographic
-    // so the newest is on top; for everything else, plain alphabetical.
     if type_name.eq_ignore_ascii_case("daily") {
         ids.sort_by(|a, b| b.cmp(a));
     } else {
@@ -151,24 +116,21 @@ fn list_nodes_by_type(type_name: String) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
+// ---------------------------------------------------------------
+// Links / neighbors
+// ---------------------------------------------------------------
+
 #[derive(Serialize)]
 struct LinkInfo {
-    /// The other end of the link (the target when reading outgoing,
-    /// the source when reading backlinks).
     peer: String,
-    /// The relationship label the author attached (e.g. "cites", "knows").
     link_type: String,
 }
 
-/// Parse the FUSE-level link entry name "type:peer-id" into its pieces.
-/// Entry names use the first colon as the delimiter; the peer id itself
-/// may contain colons and # suffixes.
 fn parse_link_entry(name: &str) -> Option<(String, String)> {
     let idx = name.find(':')?;
     Some((name[..idx].to_string(), name[idx + 1..].to_string()))
 }
 
-/// Read outgoing links of a node from /nodes/{id}/links/.
 #[tauri::command]
 fn read_outgoing_links(id: String) -> Result<Vec<LinkInfo>, String> {
     validate_node_id(&id)?;
@@ -177,7 +139,6 @@ fn read_outgoing_links(id: String) -> Result<Vec<LinkInfo>, String> {
     read_link_entries(&dir)
 }
 
-/// Read incoming links of a node from /nodes/{id}/backlinks/.
 #[tauri::command]
 fn read_backlinks(id: String) -> Result<Vec<LinkInfo>, String> {
     validate_node_id(&id)?;
@@ -203,8 +164,6 @@ fn read_link_entries(dir: &Path) -> Result<Vec<LinkInfo>, String> {
     Ok(out)
 }
 
-/// Read the ranked neighbors of a node from /nodes/{id}/neighbors/. The
-/// order returned by memex-fs IS the ranking — don't re-sort.
 #[tauri::command]
 fn read_neighbors(id: String) -> Result<Vec<String>, String> {
     validate_node_id(&id)?;
@@ -221,74 +180,10 @@ fn read_neighbors(id: String) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Read meta.json for a node. Returns None if the file is missing or
-/// malformed — label derivation treats that as "no meta."
-fn read_meta(mount: &Path, id: &str) -> Option<HashMap<String, Value>> {
-    let path = node_dir(mount, id).join("meta.json");
-    let raw = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&raw).ok()
-}
+// ---------------------------------------------------------------
+// Labels
+// ---------------------------------------------------------------
 
-/// Derive a human-meaningful label for a node id. Order of preference:
-///   1. meta.json title/name/label field (author-authored),
-///   2. first non-blank line of content (heuristic),
-///   3. humanized id (strip type prefix, pretty-format dates, truncate
-///      long hex suffixes).
-/// Always returns something non-empty, so the UI never has to decide
-/// what to render when a node has no author-given name yet.
-fn derive_label(mount: &Path, id: &str) -> String {
-    if let Some(meta) = read_meta(mount, id) {
-        for key in ["title", "name", "label"] {
-            if let Some(v) = meta.get(key).and_then(Value::as_str) {
-                let trimmed = v.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
-                }
-            }
-        }
-    }
-    if let Ok(content) = fs::read_to_string(node_dir(mount, id).join("content")) {
-        for raw_line in content.lines() {
-            let stripped = raw_line.trim().trim_start_matches('#').trim();
-            if !stripped.is_empty() {
-                return truncate_label(stripped, 60);
-            }
-        }
-    }
-    humanize_id(id)
-}
-
-fn truncate_label(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        s.to_string()
-    } else {
-        let head: String = chars.iter().take(max_chars).collect();
-        format!("{}…", head)
-    }
-}
-
-/// Turn an id like "person:alice" into "alice"; "daily:2026-04-19" into
-/// "April 19, 2026"; "sha256:abcdef01234..." into "sha256:abcdef01…".
-fn humanize_id(id: &str) -> String {
-    let (typ, rest) = match id.find(':') {
-        Some(i) => (&id[..i], &id[i + 1..]),
-        None => return id.to_string(),
-    };
-    if typ.eq_ignore_ascii_case("daily") {
-        if let Ok(d) = NaiveDate::parse_from_str(rest, "%Y-%m-%d") {
-            return d.format("%B %-d, %Y").to_string();
-        }
-    }
-    // Long hex identifiers get truncated so they don't crowd the UI.
-    if rest.len() > 16 && rest.chars().all(|c| c.is_ascii_hexdigit()) {
-        return format!("{}:{}…", typ, &rest[..8]);
-    }
-    rest.to_string()
-}
-
-/// Batch-derive labels. Unknown ids get mapped to humanize_id(id) so the
-/// UI always has something to render.
 #[tauri::command]
 fn read_node_labels(ids: Vec<String>) -> Result<HashMap<String, String>, String> {
     let mount = require_mount()?;
@@ -304,8 +199,10 @@ fn read_node_labels(ids: Vec<String>) -> Result<HashMap<String, String>, String>
     Ok(out)
 }
 
-/// Lightweight status for the frontend to show "mount not found" instead
-/// of crashing every invocation.
+// ---------------------------------------------------------------
+// Mount status
+// ---------------------------------------------------------------
+
 #[derive(Serialize)]
 struct MountStatus {
     path: String,
@@ -320,6 +217,97 @@ fn mount_status() -> MountStatus {
         path: path.to_string_lossy().into_owned(),
     }
 }
+
+// ---------------------------------------------------------------
+// Chat
+// ---------------------------------------------------------------
+
+/// Compile the prompt context for a node without sending anything to
+/// an LLM. The frontend uses this to show "what got sent" so users can
+/// audit the conversation.
+#[tauri::command]
+fn compile_node_context(id: String) -> Result<String, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    Ok(context::compile(&mount, &id))
+}
+
+/// Ask the LLM a question about a node. The given user/assistant history
+/// is preserved; the backend prepends a system prompt and a fresh
+/// context block for the node. Responses stream via "chat-chunk" events;
+/// "chat-done" fires on completion and "chat-error" on failure.
+#[tauri::command]
+async fn ask_stream(
+    app: AppHandle,
+    node_id: String,
+    history: Vec<ChatMessage>,
+    question: String,
+) -> Result<(), String> {
+    validate_node_id(&node_id)?;
+    let mount = require_mount()?;
+    let ctx = context::compile(&mount, &node_id);
+
+    let system = ChatMessage {
+        role: "system".into(),
+        content: build_system_prompt(),
+    };
+    let primer = ChatMessage {
+        role: "user".into(),
+        content: format!("Context about the node I'm looking at:\n\n{}", ctx),
+    };
+    let primer_ack = ChatMessage {
+        role: "assistant".into(),
+        content: "Got it. I'll answer your questions using this context.".into(),
+    };
+
+    let mut messages = vec![system, primer, primer_ack];
+    messages.extend(history);
+    messages.push(ChatMessage {
+        role: "user".into(),
+        content: question,
+    });
+
+    // Spawn the stream in the background so ask_stream returns
+    // immediately; the UI listens for events rather than awaiting.
+    tauri::async_runtime::spawn(async move {
+        let result = llm::stream_chat(app.clone(), messages, None).await;
+        use tauri::Emitter;
+        match result {
+            Ok(()) => {
+                let _ = app.emit("chat-done", ());
+            }
+            Err(e) => {
+                let _ = app.emit("chat-error", e);
+            }
+        }
+    });
+    Ok(())
+}
+
+fn build_system_prompt() -> String {
+    r#"You are a personal knowledge-graph assistant. The user is looking at a node in their
+graph and is asking a question about it. You have been given:
+
+- The current node's content and metadata
+- Its backlinks (other nodes that reference it)
+- Its outgoing links (what it references)
+- Its top-ranked neighbors (multi-signal relevance from memex-fs)
+
+Guidelines:
+- Answer using the provided context when possible. When you draw on the
+  context, mention nodes by their label so the user can recognize them.
+- If the context is insufficient, say so and suggest which other nodes the
+  user might explore — don't confabulate facts.
+- Be concise by default. Use Markdown for structure only when it helps.
+- When referencing a node, you can write [[id]] to let future tooling turn
+  it into a live link.
+"#
+        .to_string()
+}
+
+// ---------------------------------------------------------------
+// Run
+// ---------------------------------------------------------------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -337,6 +325,8 @@ pub fn run() {
             read_backlinks,
             read_neighbors,
             mount_status,
+            compile_node_context,
+            ask_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
