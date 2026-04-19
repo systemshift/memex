@@ -38,6 +38,11 @@ import {
   Command as CommandIcon,
   Hash,
   BookOpen,
+  Image as ImageIcon,
+  Video,
+  Music,
+  File as FileIcon,
+  FileType,
 } from "lucide-react";
 
 /**
@@ -80,6 +85,17 @@ export function typeIcon(typeName: string | undefined): LucideIcon {
       return Tag;
     case "topic":
       return Hash;
+    case "img":
+    case "image":
+      return ImageIcon;
+    case "video":
+      return Video;
+    case "audio":
+      return Music;
+    case "pdf":
+      return FileType;
+    case "file":
+      return FileIcon;
     default:
       return Box;
   }
@@ -121,4 +137,9 @@ export {
   CommandIcon,
   Hash,
   BookOpen,
+  ImageIcon,
+  Video,
+  Music,
+  FileIcon,
+  FileType,
 };

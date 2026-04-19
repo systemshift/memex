@@ -2,21 +2,58 @@
 //! events emitted via Tauri so the React frontend can render tokens as
 //! they arrive.
 //!
-//! Keep this module provider-specific on purpose. A later pass adds an
-//! abstraction when we actually have a second provider to support
-//! (Anthropic, Ollama). Speculating earlier invents wrong seams.
+//! Content shape: each ChatMessage carries an arbitrary JSON value so
+//! we can send either a plain text prompt (string) or a multimodal
+//! prompt (array of parts with text + image_url). OpenAI's chat API
+//! accepts both forms on any single message.
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
 
+/// `content` is deliberately a raw JSON Value so we don't have to
+/// maintain a tagged enum that mirrors OpenAI's shape. The frontend
+/// always sends strings; the backend may upgrade one or more messages
+/// to multimodal arrays before shipping the request.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatMessage {
-    pub role: String, // "system" | "user" | "assistant"
-    pub content: String,
+    pub role: String,
+    pub content: Value,
+}
+
+impl ChatMessage {
+    pub fn text(role: &str, s: impl Into<String>) -> Self {
+        Self {
+            role: role.to_string(),
+            content: Value::String(s.into()),
+        }
+    }
+
+    /// A user message that mixes a text prompt with one or more image
+    /// references. Used to pass an image node's bytes into the prompt
+    /// so a vision-capable model can see it.
+    pub fn text_and_images(role: &str, text: String, images: Vec<ImageInput>) -> Self {
+        let mut parts: Vec<Value> = Vec::with_capacity(1 + images.len());
+        parts.push(serde_json::json!({ "type": "text", "text": text }));
+        for img in images {
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": img.data_url }
+            }));
+        }
+        Self {
+            role: role.to_string(),
+            content: Value::Array(parts),
+        }
+    }
+}
+
+pub struct ImageInput {
+    pub data_url: String,
 }
 
 #[derive(Serialize)]
@@ -26,9 +63,6 @@ struct ChatRequest<'a> {
     stream: bool,
 }
 
-/// Parse one SSE line of the form `data: {...}` or `data: [DONE]`.
-/// Returns Some(delta-string) for a content chunk, None for anything
-/// non-content (ping, metadata, DONE).
 fn parse_sse_chunk(line: &str) -> Option<String> {
     let body = line.strip_prefix("data: ")?.trim();
     if body == "[DONE]" {
@@ -43,10 +77,6 @@ fn parse_sse_chunk(line: &str) -> Option<String> {
     Some(delta.to_string())
 }
 
-/// Stream a chat completion. Emits "chat-chunk" events with partial
-/// text, "chat-done" when the stream closes cleanly, "chat-error" on
-/// any failure. All events are strings so the frontend doesn't need a
-/// schema.
 pub async fn stream_chat(
     app: AppHandle,
     messages: Vec<ChatMessage>,
@@ -79,8 +109,6 @@ pub async fn stream_chat(
     }
 
     let mut stream = resp.bytes_stream();
-    // SSE chunks arrive split across TCP boundaries; keep a buffer and
-    // flush completed `data: {...}` lines.
     let mut buf = String::new();
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| format!("stream: {}", e))?;

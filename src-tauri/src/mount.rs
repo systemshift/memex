@@ -49,9 +49,23 @@ pub fn read_meta(mount: &Path, id: &str) -> Option<HashMap<String, Value>> {
     serde_json::from_str(&raw).ok()
 }
 
+/// Extract the MIME type from a node's meta.json, if any.
+pub fn read_mime(mount: &Path, id: &str) -> Option<String> {
+    let meta = read_meta(mount, id)?;
+    meta.get("mime")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Does this node hold binary content (image/video/audio/pdf/generic
+/// file)? Based on the MIME type recorded in meta.json at creation.
+pub fn is_binary_node(mount: &Path, id: &str) -> bool {
+    read_mime(mount, id).map(|m| !m.starts_with("text/")).unwrap_or(false)
+}
+
 pub fn derive_label(mount: &Path, id: &str) -> String {
     if let Some(meta) = read_meta(mount, id) {
-        for key in ["title", "name", "label"] {
+        for key in ["title", "name", "label", "alt"] {
             if let Some(v) = meta.get(key).and_then(Value::as_str) {
                 let trimmed = v.trim();
                 if !trimmed.is_empty() {
@@ -60,11 +74,16 @@ pub fn derive_label(mount: &Path, id: &str) -> String {
             }
         }
     }
-    if let Ok(content) = fs::read_to_string(node_dir(mount, id).join("content")) {
-        for raw_line in content.lines() {
-            let stripped = raw_line.trim().trim_start_matches('#').trim();
-            if !stripped.is_empty() {
-                return truncate_label(stripped, 60);
+    // Binary nodes don't have readable "first line" content — skip the
+    // content scan and fall through to the humanized id, which for
+    // image / video / file ids is readable on its own (e.g. `img:a0b1…`).
+    if !is_binary_node(mount, id) {
+        if let Ok(content) = fs::read_to_string(node_dir(mount, id).join("content")) {
+            for raw_line in content.lines() {
+                let stripped = raw_line.trim().trim_start_matches('#').trim();
+                if !stripped.is_empty() {
+                    return truncate_label(stripped, 60);
+                }
             }
         }
     }

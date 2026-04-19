@@ -61,6 +61,26 @@ export const api = {
   searchNodes: (query: string): Promise<string[]> =>
     invoke("search_nodes", { query }),
 
+  /** Raw bytes of a node's content. Used to render images/videos/PDFs
+   *  that were ingested as binary nodes. */
+  readNodeBytes: (id: string): Promise<number[]> =>
+    invoke("read_node_bytes", { id }),
+
+  /** MIME type of a node, if one was recorded in meta.json at creation.
+   *  Text-native nodes typically return "". */
+  readNodeMime: (id: string): Promise<string> =>
+    invoke("read_node_mime", { id }),
+
+  /** Ingest arbitrary bytes as a new node. Returns the newly-created
+   *  id (e.g. `img:9f8a2b...`) so the caller can embed it as
+   *  `memex://{id}` in document content. */
+  createBinaryNode: (
+    bytes: number[],
+    mime: string,
+    alt?: string,
+  ): Promise<string> =>
+    invoke("create_binary_node", { bytes, mime, alt }),
+
   /** Build the Markdown context block for a node, without sending it
    *  to the LLM. Used for the "show context" toggle so users can see
    *  exactly what the assistant was given. */

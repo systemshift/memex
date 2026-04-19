@@ -51,6 +51,52 @@ export function RichEditor({ nodeId, onSaved, onContentChange }: Props) {
     // Start with an empty document; we hydrate asynchronously after
     // the mount so markdown parsing doesn't block first paint.
     initialContent: [{ type: "paragraph", content: "" }],
+
+    /**
+     * Route dropped / pasted / attached files through memex-fs as
+     * new binary nodes (Image / Video / File / Audio / PDF). The
+     * returned `memex://{id}` URL is embedded in the block; the
+     * resolveFileUrl callback below turns it into a blob URL on
+     * render so the webview can actually display it.
+     */
+    uploadFile: async (file: File) => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const id = await api.createBinaryNode(
+        Array.from(bytes),
+        file.type || "application/octet-stream",
+        file.name,
+      );
+      return `memex://${id}`;
+    },
+
+    /**
+     * Turn `memex://{id}` into a Blob URL the browser can render.
+     * Pass through any other URL (http, https, data:, file:) so
+     * users can still embed external images if they want.
+     *
+     * Memory note: blob URLs are not revoked here — BlockNote
+     * holds them as long as the block is mounted. The Editor key
+     * resets on node-switch, so lingering blobs are bounded by
+     * how many blocks you display per node.
+     */
+    resolveFileUrl: async (url: string) => {
+      if (!url.startsWith("memex://")) return url;
+      const id = url.slice("memex://".length);
+      try {
+        const [bytes, mime] = await Promise.all([
+          api.readNodeBytes(id),
+          api.readNodeMime(id),
+        ]);
+        const blob = new Blob([new Uint8Array(bytes)], {
+          type: mime || "application/octet-stream",
+        });
+        return URL.createObjectURL(blob);
+      } catch {
+        // Broken URL — return an empty data: url so BlockNote shows
+        // its default broken-image placeholder.
+        return "data:,";
+      }
+    },
   });
 
   // Pull every node id once (cheap on a personal graph) for the

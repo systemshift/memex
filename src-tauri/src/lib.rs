@@ -16,10 +16,13 @@ use chrono::Local;
 use serde::Serialize;
 use tauri::AppHandle;
 
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, ImageInput};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::mount::{
-    derive_label, humanize_id, mount_path, node_dir, require_mount, validate_node_id,
+    derive_label, humanize_id, mount_path, node_dir, read_mime, require_mount, validate_node_id,
 };
+
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------
 // Node read / write
@@ -53,6 +56,98 @@ fn write_node(id: String, content: String) -> Result<(), String> {
 #[tauri::command]
 fn today_note_id() -> String {
     format!("daily:{}", Local::now().format("%Y-%m-%d"))
+}
+
+/// Read the raw bytes of a node's content. Used by the frontend to
+/// render images/videos/PDFs that were ingested as binary nodes.
+/// Returns a Vec<u8> that Tauri serializes to a JS ArrayBuffer-ish
+/// number array; the caller wraps it in a Blob for `<img>` / `<video>`.
+#[tauri::command]
+fn read_node_bytes(id: String) -> Result<Vec<u8>, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    let path = node_dir(&mount, &id).join("content");
+    fs::read(&path).map_err(|e| format!("read {}: {}", path.display(), e))
+}
+
+/// Return the MIME type recorded in meta.json for a node, or the empty
+/// string if none is set (text-native nodes typically omit it).
+#[tauri::command]
+fn read_node_mime(id: String) -> Result<String, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    Ok(read_mime(&mount, &id).unwrap_or_default())
+}
+
+/// Ingest arbitrary bytes as a new node. Hashes the content with
+/// SHA-256, picks an id-prefix from the MIME (img / video / audio /
+/// pdf / file), writes content + meta.json with the MIME and optional
+/// alt text. Returns the newly-created id so the caller can embed a
+/// `memex://{id}` URL in document bodies.
+#[tauri::command]
+fn create_binary_node(
+    bytes: Vec<u8>,
+    mime: String,
+    alt: Option<String>,
+) -> Result<String, String> {
+    let mount = require_mount()?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hex = hex::encode(hasher.finalize());
+    let short = &hex[..16];
+    let prefix = mime_to_id_prefix(&mime);
+    let id = format!("{}:{}", prefix, short);
+
+    let dir = node_dir(&mount, &id);
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
+    }
+    // Idempotent: if content already exists (same hash, same bytes), skip
+    // the rewrite so we don't churn the commit log.
+    let content_path = dir.join("content");
+    if !content_path.exists() {
+        fs::write(&content_path, &bytes)
+            .map_err(|e| format!("write {}: {}", content_path.display(), e))?;
+    }
+    let mut meta = serde_json::Map::new();
+    meta.insert("mime".into(), serde_json::Value::String(mime));
+    meta.insert(
+        "size_bytes".into(),
+        serde_json::Value::Number((bytes.len() as u64).into()),
+    );
+    if let Some(a) = alt {
+        let trimmed = a.trim();
+        if !trimmed.is_empty() {
+            meta.insert("alt".into(), serde_json::Value::String(trimmed.to_string()));
+        }
+    }
+    let meta_path = dir.join("meta.json");
+    // Only write meta.json if we just created the node; preserving an
+    // existing meta.json is important because the user may have added
+    // fields (captions, dimensions).
+    if !meta_path.exists() {
+        let json = serde_json::to_string_pretty(&meta)
+            .map_err(|e| format!("serialize meta: {}", e))?;
+        fs::write(&meta_path, json).map_err(|e| format!("write meta: {}", e))?;
+    }
+
+    Ok(id)
+}
+
+fn mime_to_id_prefix(mime: &str) -> &'static str {
+    let m = mime.to_ascii_lowercase();
+    if m.starts_with("image/") {
+        "img"
+    } else if m.starts_with("video/") {
+        "video"
+    } else if m.starts_with("audio/") {
+        "audio"
+    } else if m == "application/pdf" {
+        "pdf"
+    } else {
+        "file"
+    }
 }
 
 #[tauri::command]
@@ -272,28 +367,28 @@ async fn ask_stream(
     let mount = require_mount()?;
     let ctx = context::compile(&mount, &node_id);
 
-    let system = ChatMessage {
-        role: "system".into(),
-        content: build_system_prompt(),
+    let system = ChatMessage::text("system", build_system_prompt());
+    let primer_text = format!("Context about the node I'm looking at:\n\n{}", ctx);
+
+    // If the current node IS an image, attach its bytes as a vision
+    // input alongside the text context. Future refinement: scan the
+    // context for embedded `memex://` image refs and include those
+    // too. For now, only the current node.
+    let images = collect_current_image(&mount, &node_id);
+    let primer = if images.is_empty() {
+        ChatMessage::text("user", primer_text)
+    } else {
+        ChatMessage::text_and_images("user", primer_text, images)
     };
-    let primer = ChatMessage {
-        role: "user".into(),
-        content: format!("Context about the node I'm looking at:\n\n{}", ctx),
-    };
-    let primer_ack = ChatMessage {
-        role: "assistant".into(),
-        content: "Got it. I'll answer your questions using this context.".into(),
-    };
+    let primer_ack = ChatMessage::text(
+        "assistant",
+        "Got it. I'll answer your questions using this context.",
+    );
 
     let mut messages = vec![system, primer, primer_ack];
     messages.extend(history);
-    messages.push(ChatMessage {
-        role: "user".into(),
-        content: question,
-    });
+    messages.push(ChatMessage::text("user", question));
 
-    // Spawn the stream in the background so ask_stream returns
-    // immediately; the UI listens for events rather than awaiting.
     tauri::async_runtime::spawn(async move {
         let result = llm::stream_chat(app.clone(), messages, None).await;
         use tauri::Emitter;
@@ -307,6 +402,26 @@ async fn ask_stream(
         }
     });
     Ok(())
+}
+
+/// If the node is an image type (MIME starts with `image/`), load its
+/// bytes and pack them into a data URL suitable for OpenAI's vision
+/// input. Non-image nodes yield an empty vector. Failures return an
+/// empty vector too — vision is best-effort; chat still works without.
+fn collect_current_image(mount: &std::path::Path, node_id: &str) -> Vec<ImageInput> {
+    let Some(mime) = read_mime(mount, node_id) else {
+        return Vec::new();
+    };
+    if !mime.starts_with("image/") {
+        return Vec::new();
+    }
+    let Ok(bytes) = fs::read(node_dir(mount, node_id).join("content")) else {
+        return Vec::new();
+    };
+    let b64 = B64.encode(bytes);
+    vec![ImageInput {
+        data_url: format!("data:{};base64,{}", mime, b64),
+    }]
 }
 
 fn build_system_prompt() -> String {
@@ -343,6 +458,9 @@ pub fn run() {
             write_node,
             today_note_id,
             read_node_type,
+            read_node_bytes,
+            read_node_mime,
+            create_binary_node,
             read_node_labels,
             list_types,
             list_nodes_by_type,
