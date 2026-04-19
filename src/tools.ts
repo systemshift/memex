@@ -138,7 +138,10 @@ export function fsCreateLink(source: string, target: string, linkType: string): 
 // --- Inline reference extraction ---
 
 function extractInlineRefs(content: string): string[] {
-  const matches = content.matchAll(/\[\[([\w]+:[a-f0-9]{8,64})\]\]/g);
+  // Matches [[type:hash]] and block-scoped [[type:hash#b3]]. The block
+  // suffix is preserved in the captured id so memex-fs stores the full
+  // target and the FUSE symlink routes into /blocks/bNNNN.
+  const matches = content.matchAll(/\[\[([\w]+:[a-f0-9]{8,64}(?:#b\d+)?)\]\]/g);
   return [...new Set([...matches].map(m => m[1]))];
 }
 
