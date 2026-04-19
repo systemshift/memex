@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useNodeLabels } from "../hooks/useNodeLabels";
 import { typeIcon } from "../icons";
+import { RichEditor } from "./RichEditor";
 
 type Props = {
   nodeId: string;
@@ -15,16 +16,12 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 
 /**
  * Center column. Shows the current node's label + type, and its
- * content as a textarea. Autosave: 800ms debounce on typing, immediate
- * on blur. A block editor (BlockNote/Tiptap) with [[ref]] autocomplete
- * replaces this in a later pass.
+ * content rendered by the BlockNote-backed RichEditor. Storage stays
+ * markdown so Claude Code and bash stay first-class consumers.
  */
 export function Editor({ nodeId, onSaved, onContentChange }: Props) {
-  const [content, setContent] = useState("");
   const [typeName, setTypeName] = useState<string>("");
   const [loadError, setLoadError] = useState<string | null>(null);
-  const timer = useRef<number | null>(null);
-  const loadedForId = useRef<string>("");
   const [labelBump, setLabelBump] = useState(0);
   const labels = useNodeLabels([nodeId], labelBump);
   const label = labels[nodeId] ?? nodeId;
@@ -35,15 +32,9 @@ export function Editor({ nodeId, onSaved, onContentChange }: Props) {
     (async () => {
       setLoadError(null);
       try {
-        const [text, type_] = await Promise.all([
-          api.readNode(nodeId),
-          api.readNodeType(nodeId),
-        ]);
+        const t = await api.readNodeType(nodeId);
         if (cancelled) return;
-        setContent(text);
-        setTypeName(type_);
-        loadedForId.current = nodeId;
-        onContentChange?.(text);
+        setTypeName(t);
       } catch (e) {
         if (!cancelled) setLoadError(String(e));
       }
@@ -53,29 +44,9 @@ export function Editor({ nodeId, onSaved, onContentChange }: Props) {
     };
   }, [nodeId]);
 
-  const commit = async (text: string) => {
-    try {
-      await api.writeNode(nodeId, text);
-      setLabelBump((b) => b + 1);
-      onSaved?.();
-    } catch (e) {
-      setLoadError(String(e));
-    }
-  };
-
-  const onChange = (text: string) => {
-    setContent(text);
-    onContentChange?.(text);
-    if (timer.current !== null) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => commit(text), 800);
-  };
-
-  const onBlur = () => {
-    if (timer.current !== null) {
-      window.clearTimeout(timer.current);
-      timer.current = null;
-    }
-    if (loadedForId.current === nodeId) commit(content);
+  const handleSaved = () => {
+    setLabelBump((b) => b + 1);
+    onSaved?.();
   };
 
   const Icon = typeIcon(typeName);
@@ -93,18 +64,14 @@ export function Editor({ nodeId, onSaved, onContentChange }: Props) {
 
       {loadError && <p className="error" role="alert">{loadError}</p>}
 
-      <textarea
-        className="editor"
-        value={content}
-        onChange={(e) => onChange(e.currentTarget.value)}
-        onBlur={onBlur}
-        placeholder="Scribble here. Use [[type:id]] to link to another node."
-        spellCheck
+      <RichEditor
+        key={nodeId}
+        nodeId={nodeId}
+        onSaved={handleSaved}
+        onContentChange={onContentChange}
       />
     </section>
   );
 }
 
-// Saving state is now surfaced by the global StatusBar; this re-export
-// lets the parent wire the indicator. Editor still reports via onSaved.
 export type EditorSaveState = SaveState;
