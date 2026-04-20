@@ -8,11 +8,13 @@ import {
   ChevronRight,
   MessageSquare,
   Sparkles,
+  FileInput,
 } from "../icons";
 
 type Props = {
   onToday: () => void;
   onNew: () => void;
+  onImport: () => void;
   onSearch: () => void;
   onSettings: () => void;
   onCommand: () => void;
@@ -33,6 +35,7 @@ type Props = {
 export function Ribbon({
   onToday,
   onNew,
+  onImport,
   onSearch,
   onSettings,
   onCommand,
@@ -70,6 +73,11 @@ export function Ribbon({
           label="New node (⌘N)"
           onClick={onNew}
           icon={<Plus size={18} />}
+        />
+        <RibbonButton
+          label="Import from disk (⌘I)"
+          onClick={onImport}
+          icon={<FileInput size={18} />}
         />
         <RibbonButton
           label="Search (⌘⇧F)"

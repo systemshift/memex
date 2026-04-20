@@ -10,6 +10,7 @@ import { lazy, Suspense } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
+import { ImportDialog } from "./components/ImportDialog";
 import { useHistory } from "./hooks/useHistory";
 import { useTabs } from "./hooks/useTabs";
 
@@ -49,6 +50,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
   const [clustersOpen, setClustersOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   // Word count for the status bar — the editor feeds this.
   const [currentContent, setCurrentContent] = useState("");
@@ -166,6 +168,9 @@ export default function App() {
       } else if (k === "g" && !e.shiftKey) {
         e.preventDefault();
         setGraphOpen((v) => !v);
+      } else if (k === "i" && !e.shiftKey) {
+        e.preventDefault();
+        setImportOpen(true);
       }
     };
     window.addEventListener("keydown", h);
@@ -176,7 +181,8 @@ export default function App() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (clustersOpen) setClustersOpen(false);
+      if (importOpen) setImportOpen(false);
+      else if (clustersOpen) setClustersOpen(false);
       else if (graphOpen) setGraphOpen(false);
       else if (settingsOpen) setSettingsOpen(false);
       else if (searchOpen) setSearchOpen(false);
@@ -184,7 +190,7 @@ export default function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [paletteOpen, searchOpen, settingsOpen, graphOpen, clustersOpen]);
+  }, [paletteOpen, searchOpen, settingsOpen, graphOpen, clustersOpen, importOpen]);
 
   const wordCount = currentContent.trim()
     ? currentContent.trim().split(/\s+/).length
@@ -220,6 +226,7 @@ export default function App() {
         <Ribbon
           onToday={onToday}
           onNew={onNewNode}
+          onImport={() => setImportOpen(true)}
           onSearch={() => setSearchOpen(true)}
           onSettings={() => setSettingsOpen(true)}
           onCommand={() => setPaletteOpen(true)}
@@ -310,6 +317,14 @@ export default function App() {
           />
         )}
       </Suspense>
+      <ImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onIngested={(ids) => {
+          bump();
+          if (ids.length > 0) goTo(ids[0]);
+        }}
+      />
     </>
   );
 }

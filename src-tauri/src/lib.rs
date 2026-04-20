@@ -20,7 +20,8 @@ use tauri::AppHandle;
 use crate::llm::{ChatMessage, ImageInput};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::mount::{
-    derive_label, humanize_id, mount_path, node_dir, read_mime, require_mount, validate_node_id,
+    derive_label, humanize_id, mount_path, node_dir, read_meta, read_mime, require_mount,
+    validate_node_id,
 };
 
 use sha2::{Digest, Sha256};
@@ -33,6 +34,10 @@ use sha2::{Digest, Sha256};
 fn read_node(id: String) -> Result<String, String> {
     validate_node_id(&id)?;
     let mount = require_mount()?;
+    // Auto-sync: if this node tracks an external file and it's text,
+    // pull from the source when its mtime has moved past what we've
+    // stored. Silent no-op for non-synced nodes (the common case).
+    sync_from_source_if_stale(&mount, &id);
     let path = node_dir(&mount, &id).join("content");
     match fs::read_to_string(&path) {
         Ok(s) => Ok(s),
@@ -50,8 +55,14 @@ fn write_node(id: String, content: String) -> Result<(), String> {
         fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
     }
     let content_path = dir.join("content");
-    fs::write(&content_path, content)
-        .map_err(|e| format!("write {}: {}", content_path.display(), e))
+    fs::write(&content_path, &content)
+        .map_err(|e| format!("write {}: {}", content_path.display(), e))?;
+    // Write-back: for text nodes tracking an external path, propagate
+    // the new bytes to that path so external editors see the change.
+    // Failures are swallowed — source may have been moved, renamed,
+    // or permission-changed — node state itself is already saved.
+    write_back_to_source_if_text(&mount, &id, content.as_bytes());
+    Ok(())
 }
 
 #[tauri::command]
@@ -146,8 +157,348 @@ fn mime_to_id_prefix(mime: &str) -> &'static str {
         "audio"
     } else if m == "application/pdf" {
         "pdf"
+    } else if m == "application/epub+zip" {
+        "book"
+    } else if m == "text/markdown" || m == "text/x-markdown" {
+        "doc"
+    } else if m == "text/plain" {
+        "note"
+    } else if m.starts_with("text/x-") || m == "text/javascript" || m == "text/typescript" {
+        "code"
+    } else if m == "application/json" || m == "application/yaml" || m == "text/csv" {
+        "data"
     } else {
         "file"
+    }
+}
+
+// ---------------------------------------------------------------
+// External file ingest + bidirectional sync
+// ---------------------------------------------------------------
+
+/// Ingest a single file or walk a directory and ingest each file
+/// inside. Returns the node ids created or reused (content-addressed,
+/// so re-ingesting the same bytes produces the same id and dedups).
+///
+/// Text files get their bytes inlined AND their `source_path` recorded
+/// so subsequent reads pull fresh content and writes propagate back.
+/// Binary files are fully inlined for integrity; their `source_path`
+/// is a breadcrumb — edits don't write back, and an external change
+/// produces a new node id on the next ingest (old version preserved).
+#[tauri::command]
+fn ingest_path(path: String, recursive: bool) -> Result<Vec<String>, String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("path not found: {}", path));
+    }
+    let mount = require_mount()?;
+
+    if p.is_file() {
+        Ok(vec![ingest_single_file(&mount, &p)?])
+    } else if p.is_dir() {
+        let mut out: Vec<String> = Vec::new();
+        walk_and_ingest(&mount, &p, recursive, &mut out);
+        Ok(out)
+    } else {
+        Err(format!("not a file or directory: {}", path))
+    }
+}
+
+fn walk_and_ingest(
+    mount: &Path,
+    dir: &Path,
+    recursive: bool,
+    out: &mut Vec<String>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Skip hidden files and typical noise.
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') {
+                continue;
+            }
+        }
+        if path.is_dir() && recursive {
+            walk_and_ingest(mount, &path, recursive, out);
+        } else if path.is_file() {
+            if let Ok(id) = ingest_single_file(mount, &path) {
+                out.push(id);
+            }
+            // Unreadable / oversized / permission-denied files are
+            // silently skipped so a single bad file can't abort a
+            // 500-file import.
+        }
+    }
+}
+
+/// Ingest one file. Returns the content-addressed node id.
+fn ingest_single_file(mount: &Path, path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hex = hex::encode(hasher.finalize());
+    let short = &hex[..16];
+
+    // MIME inference: ext hint first, then content sniff as fallback.
+    let mime = mime_from_extension(path).unwrap_or_else(|| {
+        if is_text_content(&bytes) {
+            "text/plain".to_string()
+        } else {
+            "application/octet-stream".to_string()
+        }
+    });
+    let is_text = is_text_content(&bytes) && !mime.starts_with("image/") && !mime.starts_with("video/");
+
+    let prefix = mime_to_id_prefix(&mime);
+    let id = format!("{}:{}", prefix, short);
+
+    let dir = node_dir(mount, &id);
+    let is_new = !dir.exists();
+    if is_new {
+        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
+    }
+
+    // Content: write unconditionally on first ingest; skip if already
+    // present (same hash means same bytes).
+    let content_path = dir.join("content");
+    if !content_path.exists() {
+        fs::write(&content_path, &bytes).map_err(|e| format!("write content: {}", e))?;
+    }
+
+    // meta.json — record the source breadcrumb and sync state. Merge
+    // with existing meta so a re-ingest of the same file updates
+    // source_path / mtime without clobbering user-added fields.
+    let mut desired_meta = serde_json::Map::new();
+    desired_meta.insert(
+        "mime".into(),
+        serde_json::Value::String(mime.clone()),
+    );
+    desired_meta.insert(
+        "size_bytes".into(),
+        serde_json::Value::Number((bytes.len() as u64).into()),
+    );
+    desired_meta.insert(
+        "source_path".into(),
+        serde_json::Value::String(path.to_string_lossy().into_owned()),
+    );
+    desired_meta.insert(
+        "external_mtime".into(),
+        serde_json::Value::Number(source_mtime_secs(path).unwrap_or(0).into()),
+    );
+    desired_meta.insert(
+        "external_hash".into(),
+        serde_json::Value::String(format!("sha256:{}", hex)),
+    );
+    desired_meta.insert("is_text".into(), serde_json::Value::Bool(is_text));
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        desired_meta.insert(
+            "basename".into(),
+            serde_json::Value::String(name.to_string()),
+        );
+    }
+
+    let meta_path = dir.join("meta.json");
+    let merged: serde_json::Map<String, serde_json::Value> = if meta_path.exists() {
+        let mut prev: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(&meta_path).unwrap_or_default())
+                .unwrap_or_default();
+        for (k, v) in desired_meta {
+            prev.insert(k, v);
+        }
+        prev
+    } else {
+        desired_meta
+    };
+    let json = serde_json::to_string_pretty(&merged).map_err(|e| format!("serialize meta: {}", e))?;
+    fs::write(&meta_path, json).map_err(|e| format!("write meta: {}", e))?;
+
+    Ok(id)
+}
+
+/// Basic text-or-binary heuristic: sample the first 8 KB, reject on
+/// any null byte (binary marker) or invalid UTF-8.
+fn is_text_content(bytes: &[u8]) -> bool {
+    let sample_len = bytes.len().min(8192);
+    let sample = &bytes[..sample_len];
+    if sample.contains(&0) {
+        return false;
+    }
+    std::str::from_utf8(sample).is_ok()
+}
+
+/// Guess a MIME from the file extension. Missing extensions / unknown
+/// extensions return None so the caller can fall back to content-sniff.
+fn mime_from_extension(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    Some(
+        match ext.as_str() {
+            "md" | "markdown" => "text/markdown",
+            "txt" | "log" => "text/plain",
+            "json" => "application/json",
+            "yaml" | "yml" => "application/yaml",
+            "csv" => "text/csv",
+            "rs" => "text/x-rust",
+            "ts" | "tsx" => "text/typescript",
+            "js" | "jsx" | "mjs" | "cjs" => "text/javascript",
+            "py" => "text/x-python",
+            "go" => "text/x-go",
+            "java" => "text/x-java",
+            "c" | "h" => "text/x-c",
+            "cpp" | "cc" | "hpp" => "text/x-c++",
+            "rb" => "text/x-ruby",
+            "sh" | "bash" | "zsh" => "text/x-shellscript",
+            "html" | "htm" => "text/html",
+            "css" => "text/css",
+            "xml" => "application/xml",
+            "pdf" => "application/pdf",
+            "epub" => "application/epub+zip",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "mp4" => "video/mp4",
+            "webm" => "video/webm",
+            "mov" => "video/quicktime",
+            "mp3" => "audio/mpeg",
+            "wav" => "audio/wav",
+            "flac" => "audio/flac",
+            "ogg" => "audio/ogg",
+            "zip" => "application/zip",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+fn source_mtime_secs(path: &Path) -> Option<i64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
+/// If the node is text + has a source_path + the source mtime has
+/// advanced past what we've stored, re-read the source and update the
+/// node's content + meta. Silent no-op for every other case.
+fn sync_from_source_if_stale(mount: &Path, id: &str) {
+    let Some(meta) = read_meta(mount, id) else {
+        return;
+    };
+    let is_text = meta
+        .get("is_text")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_text {
+        return;
+    }
+    let Some(source_str) = meta.get("source_path").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let source = std::path::PathBuf::from(source_str);
+    let Some(current_mtime) = source_mtime_secs(&source) else {
+        return; // missing / unreadable — don't clobber local content
+    };
+    let stored_mtime = meta
+        .get("external_mtime")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    if current_mtime <= stored_mtime {
+        return;
+    }
+
+    let Ok(bytes) = fs::read(&source) else {
+        return;
+    };
+    let content_path = node_dir(mount, id).join("content");
+    let _ = fs::write(&content_path, &bytes);
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hex = hex::encode(hasher.finalize());
+
+    let meta_path = node_dir(mount, id).join("meta.json");
+    if let Ok(existing) = fs::read_to_string(&meta_path) {
+        if let Ok(mut prev) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&existing)
+        {
+            prev.insert(
+                "external_mtime".into(),
+                serde_json::Value::Number(current_mtime.into()),
+            );
+            prev.insert(
+                "external_hash".into(),
+                serde_json::Value::String(format!("sha256:{}", hex)),
+            );
+            prev.insert(
+                "size_bytes".into(),
+                serde_json::Value::Number((bytes.len() as u64).into()),
+            );
+            if let Ok(json) = serde_json::to_string_pretty(&prev) {
+                let _ = fs::write(&meta_path, json);
+            }
+        }
+    }
+}
+
+/// Mirror a node's new content back to its tracked source_path when
+/// it's text. Silent no-op for binary nodes, untracked nodes, or
+/// missing sources (letting the user delete/rename external files
+/// without the app exploding).
+fn write_back_to_source_if_text(mount: &Path, id: &str, new_bytes: &[u8]) {
+    let Some(meta) = read_meta(mount, id) else {
+        return;
+    };
+    let is_text = meta
+        .get("is_text")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_text {
+        return;
+    }
+    let Some(source_str) = meta.get("source_path").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let source = std::path::PathBuf::from(source_str);
+    if fs::write(&source, new_bytes).is_err() {
+        return;
+    }
+    // Update the stored mtime + hash so the next read doesn't think
+    // the external changed and re-sync (which would be a harmless
+    // no-op but costs an extra read).
+    let new_mtime = source_mtime_secs(&source).unwrap_or(0);
+    let mut hasher = Sha256::new();
+    hasher.update(new_bytes);
+    let hex = hex::encode(hasher.finalize());
+
+    let meta_path = node_dir(mount, id).join("meta.json");
+    if let Ok(existing) = fs::read_to_string(&meta_path) {
+        if let Ok(mut prev) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&existing)
+        {
+            prev.insert(
+                "external_mtime".into(),
+                serde_json::Value::Number(new_mtime.into()),
+            );
+            prev.insert(
+                "external_hash".into(),
+                serde_json::Value::String(format!("sha256:{}", hex)),
+            );
+            prev.insert(
+                "size_bytes".into(),
+                serde_json::Value::Number((new_bytes.len() as u64).into()),
+            );
+            if let Ok(json) = serde_json::to_string_pretty(&prev) {
+                let _ = fs::write(&meta_path, json);
+            }
+        }
     }
 }
 
@@ -774,6 +1125,7 @@ Guidelines:
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             read_node,
             write_node,
@@ -783,6 +1135,7 @@ pub fn run() {
             read_node_mime,
             create_binary_node,
             read_node_labels,
+            ingest_path,
             list_types,
             list_nodes_by_type,
             read_outgoing_links,

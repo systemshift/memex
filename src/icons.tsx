@@ -43,6 +43,10 @@ import {
   Music,
   File as FileIcon,
   FileType,
+  FolderOpen,
+  Code,
+  Database,
+  FileInput,
 } from "lucide-react";
 
 /**
@@ -96,6 +100,14 @@ export function typeIcon(typeName: string | undefined): LucideIcon {
       return FileType;
     case "file":
       return FileIcon;
+    case "doc":
+      return FileText;
+    case "code":
+      return Code;
+    case "data":
+      return Database;
+    case "book":
+      return BookOpen;
     default:
       return Box;
   }
@@ -142,4 +154,8 @@ export {
   Music,
   FileIcon,
   FileType,
+  FolderOpen,
+  Code,
+  Database,
+  FileInput,
 };

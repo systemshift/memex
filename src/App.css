@@ -1266,6 +1266,83 @@ code {
 
 /* ---------- Hover preview ---------- */
 
+/* ---------- Import modal ---------- */
+
+.import-modal {
+  width: 520px;
+}
+.import-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+}
+.import-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  transition: background 100ms, border-color 100ms;
+  text-align: left;
+  width: 100%;
+}
+.import-row:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.import-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.import-row svg {
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.import-row-title {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.import-row-subtitle {
+  font-size: 12px;
+  color: var(--fg-muted);
+  line-height: 1.45;
+  margin-top: 2px;
+}
+.import-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+  padding: 2px 4px;
+}
+.import-option input {
+  margin: 0;
+}
+.import-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  border-top: 1px solid var(--border);
+}
+.import-status svg {
+  color: var(--fg-muted);
+}
+.import-success {
+  color: var(--ok);
+}
+.import-success code {
+  font-size: 11px;
+}
+
 /* ---------- Graph view modal ---------- */
 
 .graph-backdrop {

@@ -98,6 +98,13 @@ export const api = {
   ): Promise<string> =>
     invoke("create_binary_node", { bytes, mime, alt }),
 
+  /** Ingest an external file (or directory, optionally recursively).
+   *  Text files are inlined and kept in bidirectional sync with the
+   *  source; binary files are inlined for integrity. Returns every
+   *  node id created or reused (content-addressed — duplicates dedup). */
+  ingestPath: (path: string, recursive: boolean): Promise<string[]> =>
+    invoke("ingest_path", { path, recursive }),
+
   /** Build the Markdown context block for a node, without sending it
    *  to the LLM. Used for the "show context" toggle so users can see
    *  exactly what the assistant was given. */
