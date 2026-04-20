@@ -11,6 +11,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 use chrono::Local;
 use serde::Serialize;
@@ -498,7 +499,7 @@ struct CommitInfo {
     author: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct CommitJson {
     #[serde(default)]
     parent: String,
@@ -512,28 +513,40 @@ struct CommitJson {
     refs: HashMap<String, String>,
 }
 
-/// Walk the commit log newer-first and return the commits where the
-/// given node's ref changed (including creation and deletion). This
-/// is the per-node history surface the right-panel's History tab
-/// renders. Limit caps how many log entries we scan; memex-fs
-/// currently caps its FUSE log view at 64.
-#[tauri::command]
-fn list_node_history(id: String, limit: u32) -> Result<Vec<CommitInfo>, String> {
-    validate_node_id(&id)?;
-    let mount = require_mount()?;
-    let log_dir = mount.join("log");
+/// Parsed commit log kept in memory so per-node history lookups don't
+/// pay for 64 FUSE reads on every tab switch. Invalidated when HEAD
+/// moves (a new commit exists that the cache hasn't seen).
+struct CommitLogCache {
+    head_cid: String,
+    commits: Vec<CommitJson>,
+    cids: Vec<String>,
+}
 
-    let head_cid = match fs::read_to_string(log_dir.join("HEAD")) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return Ok(Vec::new()),
-    };
+static COMMIT_CACHE: Mutex<Option<CommitLogCache>> = Mutex::new(None);
+
+/// Return the full parsed commit log (commits + their CIDs, newest
+/// first). Uses the cached copy if HEAD hasn't moved, else walks
+/// /log/0.../log/63 and rebuilds.
+fn commit_log_snapshot(mount: &Path) -> Option<(Vec<CommitJson>, Vec<String>)> {
+    let log_dir = mount.join("log");
+    let head_cid = fs::read_to_string(log_dir.join("HEAD"))
+        .ok()?
+        .trim()
+        .to_string();
     if head_cid.is_empty() || head_cid == "(none)" {
-        return Ok(Vec::new());
+        return None;
     }
 
+    let mut cache = COMMIT_CACHE.lock().ok()?;
+    if let Some(c) = cache.as_ref() {
+        if c.head_cid == head_cid {
+            return Some((c.commits.clone(), c.cids.clone()));
+        }
+    }
+
+    // Cache miss: rebuild from /log/.
     let mut commits: Vec<CommitJson> = Vec::new();
-    let cap = limit.min(64) as usize;
-    for i in 0..cap {
+    for i in 0..64 {
         let path = log_dir.join(format!("{}", i));
         let raw = match fs::read_to_string(&path) {
             Ok(s) => s,
@@ -544,26 +557,56 @@ fn list_node_history(id: String, limit: u32) -> Result<Vec<CommitInfo>, String> 
             Err(_) => break,
         }
     }
-    if commits.is_empty() {
+
+    let mut cids: Vec<String> = Vec::with_capacity(commits.len());
+    if !commits.is_empty() {
+        cids.push(head_cid.clone());
+        for c in &commits[..commits.len().saturating_sub(1)] {
+            cids.push(c.parent.clone());
+        }
+    }
+
+    *cache = Some(CommitLogCache {
+        head_cid,
+        commits: commits.clone(),
+        cids: cids.clone(),
+    });
+    Some((commits, cids))
+}
+
+/// Walk the commit log newer-first and return the commits where the
+/// given node's ref changed (including creation and deletion). This
+/// is the per-node history surface the right-panel's History tab
+/// renders. Limit caps how many log entries we scan; memex-fs
+/// currently caps its FUSE log view at 64.
+#[tauri::command]
+fn list_node_history(id: String, limit: u32) -> Result<Vec<CommitInfo>, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+
+    // Single cached read of the log; subsequent calls with the same
+    // HEAD reuse the parsed commits. This is the big win: a tab
+    // switch used to fire 64 FUSE reads + JSON parses per node.
+    let (all_commits, all_cids) = match commit_log_snapshot(&mount) {
+        Some(pair) => pair,
+        None => return Ok(Vec::new()),
+    };
+    if all_commits.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Derive each commit's own CID by chaining parents from HEAD.
-    let mut cids: Vec<String> = Vec::with_capacity(commits.len());
-    cids.push(head_cid);
-    for c in &commits[..commits.len().saturating_sub(1)] {
-        cids.push(c.parent.clone());
-    }
+    let cap = (limit as usize).min(all_commits.len());
+    let commits = &all_commits[..cap];
+    let cids = &all_cids[..cap];
 
-    // Filter to commits where this node's ref changed vs the parent.
     let mut out: Vec<CommitInfo> = Vec::new();
     for i in 0..commits.len() {
         let this_ref = commits[i].refs.get(&id);
         let parent_ref = commits.get(i + 1).and_then(|p| p.refs.get(&id));
         let changed = match (this_ref, parent_ref) {
             (Some(a), Some(b)) => a != b,
-            (Some(_), None) => true,  // created in this commit (as far as our window sees)
-            (None, Some(_)) => true,  // deleted in this commit
+            (Some(_), None) => true, // created in this commit (as far as our window sees)
+            (None, Some(_)) => true, // deleted in this commit
             (None, None) => false,
         };
         if changed {

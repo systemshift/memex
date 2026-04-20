@@ -10,6 +10,9 @@ type Props = {
   onSaved?: () => void;
   /** Reports content length to the status bar for word count. */
   onContentChange?: (content: string) => void;
+  /** Threaded to the editor so the `[[` picker refreshes when the
+   *  graph changes (new nodes, renames, etc.). */
+  refreshKey?: number;
 };
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -19,7 +22,7 @@ type SaveState = "idle" | "saving" | "saved" | "error";
  * content rendered by the BlockNote-backed RichEditor. Storage stays
  * markdown so Claude Code and bash stay first-class consumers.
  */
-export function Editor({ nodeId, onSaved, onContentChange }: Props) {
+export function Editor({ nodeId, onSaved, onContentChange, refreshKey }: Props) {
   const [typeName, setTypeName] = useState<string>("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [labelBump, setLabelBump] = useState(0);
@@ -65,10 +68,10 @@ export function Editor({ nodeId, onSaved, onContentChange }: Props) {
       {loadError && <p className="error" role="alert">{loadError}</p>}
 
       <RichEditor
-        key={nodeId}
         nodeId={nodeId}
         onSaved={handleSaved}
         onContentChange={onContentChange}
+        refreshKey={refreshKey}
       />
     </section>
   );

@@ -6,13 +6,23 @@ import { RightPanel } from "./components/RightPanel";
 import { Ribbon } from "./components/Ribbon";
 import { StatusBar } from "./components/StatusBar";
 import { EditorTabs } from "./components/EditorTabs";
+import { lazy, Suspense } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
-import { GraphViewModal } from "./components/GraphViewModal";
-import { ClustersModal } from "./components/ClustersModal";
 import { useHistory } from "./hooks/useHistory";
 import { useTabs } from "./hooks/useTabs";
+
+// Heavy modals get their own chunks so they don't bloat the first
+// paint. The Graph modal in particular pulls in react-force-graph-2d
+// and d3-force (~300KB); deferring it until the user actually opens
+// the view keeps initial load snappy.
+const GraphViewModal = lazy(() =>
+  import("./components/GraphViewModal").then((m) => ({ default: m.GraphViewModal })),
+);
+const ClustersModal = lazy(() =>
+  import("./components/ClustersModal").then((m) => ({ default: m.ClustersModal })),
+);
 import "./App.css";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -238,11 +248,11 @@ export default function App() {
               refreshKey={refreshKey}
             />
             <EditorWithSave
-              key={currentId}
               nodeId={currentId}
               onSaved={bump}
               onContentChange={setCurrentContent}
               onSaveState={setSaveState}
+              refreshKey={refreshKey}
             />
           </div>
 
@@ -284,56 +294,40 @@ export default function App() {
         model={DEFAULT_MODEL}
         apiKeyPresent={apiKeyPresent}
       />
-      <GraphViewModal
-        open={graphOpen}
-        onClose={() => setGraphOpen(false)}
-        centerId={currentId}
-        onSelect={goTo}
-      />
-      <ClustersModal
-        open={clustersOpen}
-        onClose={() => setClustersOpen(false)}
-        onSelect={goTo}
-      />
+      <Suspense fallback={null}>
+        {graphOpen && (
+          <GraphViewModal
+            open={graphOpen}
+            onClose={() => setGraphOpen(false)}
+            centerId={currentId}
+            onSelect={goTo}
+          />
+        )}
+        {clustersOpen && (
+          <ClustersModal
+            open={clustersOpen}
+            onClose={() => setClustersOpen(false)}
+            onSelect={goTo}
+          />
+        )}
+      </Suspense>
     </>
   );
 }
 
 /** Editor wrapper that also reports save state up. Keeping the wrapper
  *  external so Editor stays focused on content editing. */
-function EditorWithSave({
-  nodeId,
-  onSaved,
-  onContentChange,
-  onSaveState,
-}: {
+function EditorWithSave(props: {
   nodeId: string;
   onSaved?: () => void;
   onContentChange?: (c: string) => void;
   onSaveState: (s: SaveState) => void;
+  refreshKey?: number;
 }) {
-  return (
-    <EditorWithSaveInner
-      nodeId={nodeId}
-      onSaved={onSaved}
-      onContentChange={onContentChange}
-      onSaveState={onSaveState}
-    />
-  );
-}
-
-function EditorWithSaveInner(props: {
-  nodeId: string;
-  onSaved?: () => void;
-  onContentChange?: (c: string) => void;
-  onSaveState: (s: SaveState) => void;
-}) {
-  // Patch the Editor to pipe saveState up by overriding writeNode
-  // via a proxy effect. Simpler: render the Editor and derive state
-  // from its observable effects.
   return (
     <Editor
       nodeId={props.nodeId}
+      refreshKey={props.refreshKey}
       onSaved={() => {
         props.onSaveState("saved");
         // Reset to idle after a moment so the status bar doesn't look frozen.

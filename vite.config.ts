@@ -29,4 +29,31 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+
+  build: {
+    // Raise the warn threshold so BlockNote's chunk doesn't generate
+    // noise — we've deliberately split it into its own chunk.
+    chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      output: {
+        // Split heavy dependencies into their own chunks so the
+        // initial bundle stays small and each library's bytes only
+        // arrive when they're actually needed.
+        manualChunks: {
+          // React runtime + markdown renderer
+          react: ["react", "react-dom", "react-markdown", "remark-gfm"],
+          // BlockNote editor (biggest single dep — ProseMirror + extensions)
+          blocknote: [
+            "@blocknote/react",
+            "@blocknote/core",
+            "@blocknote/mantine",
+          ],
+          // Force-directed graph (d3-force + canvas renderer)
+          "force-graph": ["react-force-graph-2d"],
+          // Command-palette + fuzzy search
+          ui: ["cmdk", "fuse.js", "lucide-react"],
+        },
+      },
+    },
+  },
 }));
