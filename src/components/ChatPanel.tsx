@@ -14,10 +14,13 @@ type Props = {
  * block about the current node (content + backlinks + outgoing + top
  * neighbors) so the LLM answers from the user's graph.
  *
- * Assistant messages render as Markdown (GFM: tables, strikethrough,
- * autolinks). User messages stay plain — they're short prompts.
- *
- * History is ephemeral per-session and cleared on node switch.
+ * Streaming chunks append directly to the last assistant bubble via
+ * functional setHistory — no shared mutable accumulator. This is what
+ * fixes the "bubble disappears mid-stream" bug: the previous impl
+ * used a ref that a chat-done handler would reset to "", and if a
+ * duplicate listener (e.g. under React StrictMode's double-mount
+ * dance) replayed the reset, subsequent chunks would overwrite the
+ * bubble with only the latest payload.
  */
 export function ChatPanel({ nodeId }: Props) {
   const [history, setHistory] = useState<ChatMessage[]>([]);
@@ -27,7 +30,6 @@ export function ChatPanel({ nodeId }: Props) {
   const [contextText, setContextText] = useState<string | null>(null);
   const [showContext, setShowContext] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const streamingMsg = useRef<string>("");
 
   useEffect(() => {
     setHistory([]);
@@ -38,36 +40,62 @@ export function ChatPanel({ nodeId }: Props) {
   }, [nodeId]);
 
   useEffect(() => {
+    // The listen() call is async; if the component unmounts (or
+    // StrictMode tears down) before it resolves, we have to
+    // remember to unlisten the moment it does resolve. Otherwise
+    // we end up with zombie listeners multiplying setHistory
+    // updates — which was the original blink bug.
+    let cancelled = false;
     let unlistenChunk: UnlistenFn | null = null;
     let unlistenDone: UnlistenFn | null = null;
     let unlistenError: UnlistenFn | null = null;
 
-    (async () => {
-      unlistenChunk = await listen<string>("chat-chunk", (ev) => {
-        streamingMsg.current += ev.payload;
+    const register = async () => {
+      const c = await listen<string>("chat-chunk", (ev) => {
+        const delta = ev.payload;
         setHistory((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
           if (last && last.role === "assistant") {
-            next[next.length - 1] = { ...last, content: streamingMsg.current };
+            next[next.length - 1] = {
+              ...last,
+              content: last.content + delta,
+            };
           } else {
-            next.push({ role: "assistant", content: streamingMsg.current });
+            next.push({ role: "assistant", content: delta });
           }
           return next;
         });
       });
-      unlistenDone = await listen<null>("chat-done", () => {
-        streamingMsg.current = "";
+      if (cancelled) {
+        c();
+        return;
+      }
+      unlistenChunk = c;
+
+      const d = await listen<null>("chat-done", () => {
         setStreaming(false);
       });
-      unlistenError = await listen<string>("chat-error", (ev) => {
-        streamingMsg.current = "";
+      if (cancelled) {
+        d();
+        return;
+      }
+      unlistenDone = d;
+
+      const e = await listen<string>("chat-error", (ev) => {
         setStreaming(false);
         setError(ev.payload);
       });
-    })();
+      if (cancelled) {
+        e();
+        return;
+      }
+      unlistenError = e;
+    };
+    register();
 
     return () => {
+      cancelled = true;
       unlistenChunk?.();
       unlistenDone?.();
       unlistenError?.();
@@ -84,12 +112,7 @@ export function ChatPanel({ nodeId }: Props) {
     if (!question || streaming) return;
     setError(null);
     setInput("");
-    const nextHistory: ChatMessage[] = [
-      ...history,
-      { role: "user", content: question },
-    ];
-    setHistory(nextHistory);
-    streamingMsg.current = "";
+    setHistory((prev) => [...prev, { role: "user", content: question }]);
     setStreaming(true);
     try {
       await api.askStream(nodeId, history, question);
@@ -137,9 +160,24 @@ export function ChatPanel({ nodeId }: Props) {
             </ul>
           </div>
         )}
-        {history.map((m, i) => (
-          <Bubble key={i} role={m.role} content={m.content} />
-        ))}
+        {history.map((m, i) => {
+          // The actively-streaming bubble renders as plain text so
+          // partial-markdown reparsing doesn't visually flicker. Once
+          // chat-done fires, streaming flips off and the same bubble
+          // re-renders via react-markdown.
+          const isStreamingBubble =
+            streaming &&
+            i === history.length - 1 &&
+            m.role === "assistant";
+          return (
+            <Bubble
+              key={i}
+              role={m.role}
+              content={m.content}
+              asMarkdown={m.role === "assistant" && !isStreamingBubble}
+            />
+          );
+        })}
         {streaming && history[history.length - 1]?.role !== "assistant" && (
           <div className="chat-bubble assistant">
             <div className="chat-bubble-role">assistant</div>
@@ -184,7 +222,11 @@ export function ChatPanel({ nodeId }: Props) {
           rows={2}
           disabled={streaming}
         />
-        <button className="btn-primary" type="submit" disabled={streaming || !input.trim()}>
+        <button
+          className="btn-primary"
+          type="submit"
+          disabled={streaming || !input.trim()}
+        >
           {streaming ? "…" : "Send"}
         </button>
       </form>
@@ -192,17 +234,28 @@ export function ChatPanel({ nodeId }: Props) {
   );
 }
 
-function Bubble({ role, content }: { role: string; content: string }) {
+function Bubble({
+  role,
+  content,
+  asMarkdown,
+}: {
+  role: string;
+  content: string;
+  /** When true, run content through react-markdown. When false, show
+   *  plain text with `pre-wrap` formatting. Streaming bubbles use
+   *  plain text so partial-syntax reparsing doesn't flicker. */
+  asMarkdown: boolean;
+}) {
   return (
-    <div className={`chat-bubble ${role}`}>
+    <div className={`chat-bubble ${role} ${asMarkdown ? "md" : "plain"}`}>
       <div className="chat-bubble-role">{role}</div>
       <div className="chat-bubble-content">
-        {role === "assistant" ? (
+        {asMarkdown ? (
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {content || "…"}
           </ReactMarkdown>
         ) : (
-          content
+          content || "…"
         )}
       </div>
     </div>

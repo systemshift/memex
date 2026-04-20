@@ -832,7 +832,13 @@ code {
 }
 .chat-bubble.assistant .chat-bubble-content {
   background: var(--bg-elev);
+}
+.chat-bubble.assistant.md .chat-bubble-content {
   white-space: normal;
+}
+.chat-bubble.assistant.plain .chat-bubble-content {
+  /* While streaming we render plain text — keep line breaks. */
+  white-space: pre-wrap;
 }
 .chat-bubble.assistant .chat-bubble-content p {
   margin: 0 0 8px;
