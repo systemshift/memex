@@ -1163,6 +1163,282 @@ fn collect_current_image(mount: &std::path::Path, node_id: &str) -> Vec<ImageInp
     }]
 }
 
+// ---------------------------------------------------------------
+// Entity extraction (LLM → Person / Concept / Organization / Claim)
+// ---------------------------------------------------------------
+
+/// Kick off an LLM pass over the node's text that creates linked
+/// Concept / Person / Organization / Claim nodes in the graph. Emits
+/// events as it goes:
+///
+///   extract-start  (payload: node_id)
+///   extract-item   (payload: "person: Yann LeCun" / etc)
+///   extract-done   (payload: "N entities linked")
+///   extract-error  (payload: error message)
+#[tauri::command]
+async fn extract_entities(app: AppHandle, node_id: String) -> Result<(), String> {
+    validate_node_id(&node_id)?;
+    let mount = require_mount()?;
+
+    let text = load_node_text(&mount, &node_id)?;
+    if text.trim().chars().count() < 50 {
+        return Err(
+            "This node has too little text to extract entities from. Add more content or extract source text first.".into(),
+        );
+    }
+
+    use tauri::Emitter;
+    let _ = app.emit("extract-start", &node_id);
+
+    let node_id_owned = node_id.clone();
+    tauri::async_runtime::spawn(async move {
+        match do_extract(&mount, &node_id_owned, &text, &app).await {
+            Ok(count) => {
+                let _ = app.emit("extract-done", format!("{} entities linked", count));
+            }
+            Err(e) => {
+                let _ = app.emit("extract-error", e);
+            }
+        }
+    });
+    Ok(())
+}
+
+async fn do_extract(
+    mount: &Path,
+    node_id: &str,
+    text: &str,
+    app: &AppHandle,
+) -> Result<usize, String> {
+    let prompt_text = truncate_chars(text, 30_000);
+    let system = ChatMessage::text("system", EXTRACTION_SYSTEM_PROMPT);
+    let user = ChatMessage::text(
+        "user",
+        format!(
+            "Extract entities from the following document. Return ONLY the JSON object described above.\n\nDOCUMENT:\n\n{}",
+            prompt_text
+        ),
+    );
+    let response = llm::chat_json(vec![system, user], None).await?;
+
+    let mut created = 0usize;
+    use tauri::Emitter;
+
+    if let Some(arr) = response.get("concepts").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some((name, desc)) = parse_named_item(item) {
+                if let Ok(id) = ensure_entity(mount, "concept", &name, desc.as_deref()) {
+                    let _ = link_mentions(mount, node_id, &id);
+                    let _ = app.emit("extract-item", format!("concept: {}", name));
+                    created += 1;
+                }
+            }
+        }
+    }
+    if let Some(arr) = response.get("people").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some((name, desc)) = parse_named_item(item) {
+                if let Ok(id) = ensure_entity(mount, "person", &name, desc.as_deref()) {
+                    let _ = link_mentions(mount, node_id, &id);
+                    let _ = app.emit("extract-item", format!("person: {}", name));
+                    created += 1;
+                }
+            }
+        }
+    }
+    if let Some(arr) = response.get("organizations").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some((name, desc)) = parse_named_item(item) {
+                if let Ok(id) = ensure_entity(mount, "org", &name, desc.as_deref()) {
+                    let _ = link_mentions(mount, node_id, &id);
+                    let _ = app.emit("extract-item", format!("org: {}", name));
+                    created += 1;
+                }
+            }
+        }
+    }
+    if let Some(arr) = response.get("claims").and_then(|v| v.as_array()) {
+        for item in arr {
+            let text_val = item
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| item.get("text").and_then(|v| v.as_str()).map(str::to_string));
+            if let Some(claim_text) = text_val {
+                let trimmed = claim_text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(id) = ensure_entity(mount, "claim", trimmed, None) {
+                    let _ = link_mentions(mount, node_id, &id);
+                    let _ = app.emit("extract-item", format!("claim: {}", truncate_chars(trimmed, 60)));
+                    created += 1;
+                }
+            }
+        }
+    }
+
+    Ok(created)
+}
+
+const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are extracting entities from a user's document for a personal
+knowledge graph. Return ONLY a JSON object matching this schema (all
+fields optional; omit sections you have nothing for):
+
+{
+  "concepts":      [ { "name": "string", "description": "one sentence" } ],
+  "people":        [ { "name": "string", "description": "one sentence role/context" } ],
+  "organizations": [ { "name": "string", "description": "one sentence" } ],
+  "claims":        [ "a single short sentence stating one falsifiable claim the document makes" ]
+}
+
+Rules:
+- Only include entities clearly discussed in the document.
+- Avoid generic terms ("the model", "the author"). Name things by canonical name
+  ("Yann LeCun", "attention mechanism", "OpenAI").
+- 3–15 items per section, capped. No duplicates.
+- Use canonical capitalization and standard naming.
+- Claims should be specific to the document, not generic facts.
+"#;
+
+/// Pull a usable text body for extraction — content for text nodes,
+/// the stored extracted_text for binary nodes. Returns Err if neither
+/// is available.
+fn load_node_text(mount: &Path, id: &str) -> Result<String, String> {
+    if let Some(meta) = read_meta(mount, id) {
+        if let Some(ex) = meta.get("extracted_text").and_then(|v| v.as_str()) {
+            if !ex.trim().is_empty() {
+                return Ok(ex.to_string());
+            }
+        }
+    }
+    let path = node_dir(mount, id).join("content");
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("read content {}: {}", path.display(), e))?;
+    if content.trim().is_empty() {
+        return Err("node has no readable text".into());
+    }
+    Ok(content)
+}
+
+fn parse_named_item(v: &serde_json::Value) -> Option<(String, Option<String>)> {
+    if let Some(s) = v.as_str() {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some((trimmed.to_string(), None));
+    }
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let desc = v
+        .get("description")
+        .or_else(|| v.get("role"))
+        .or_else(|| v.get("kind"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Some((trimmed.to_string(), desc))
+}
+
+/// Ensure an entity node for (type_prefix, name) exists. If it's new,
+/// writes meta.name + meta.description and the node's content (a one-
+/// line description). Returns the node id either way.
+fn ensure_entity(
+    mount: &Path,
+    type_prefix: &str,
+    name: &str,
+    description: Option<&str>,
+) -> Result<String, String> {
+    let slug = slugify(name);
+    if slug.is_empty() {
+        return Err(format!("can't slugify: {}", name));
+    }
+    let id = format!("{}:{}", type_prefix, slug);
+    let dir = node_dir(mount, &id);
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
+        // Seed content with the description so the node isn't blank on
+        // first open, and the label derivation has something to fall
+        // back on if meta.name isn't set for some reason.
+        let body = match description {
+            Some(d) => format!("{}\n", d),
+            None => String::new(),
+        };
+        let _ = fs::write(dir.join("content"), body);
+    }
+    // Update or create meta. Preserve anything the user put there,
+    // add `name` and `description` if missing.
+    let meta_path = dir.join("meta.json");
+    let mut meta: serde_json::Map<String, serde_json::Value> = fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    meta.entry("name".to_string())
+        .or_insert_with(|| serde_json::Value::String(name.to_string()));
+    if let Some(d) = description {
+        meta.entry("description".to_string())
+            .or_insert_with(|| serde_json::Value::String(d.to_string()));
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&meta) {
+        let _ = fs::write(&meta_path, json);
+    }
+    Ok(id)
+}
+
+/// Create a `mentions` link from source to target by writing the FUSE
+/// symlink that memex-fs's LinksDir recognises. Idempotent — dup symlink
+/// attempts are silently swallowed.
+fn link_mentions(mount: &Path, source: &str, target: &str) -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+    let links_dir = node_dir(mount, source).join("links");
+    fs::create_dir_all(&links_dir).ok();
+    let link_path = links_dir.join(format!("mentions:{}", target));
+    let sym_target = format!("../../{}", target);
+    // ignore AlreadyExists
+    match symlink(&sym_target, &link_path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(format!("create link {}: {}", link_path.display(), e)),
+    }
+}
+
+fn slugify(s: &str) -> String {
+    let lower: String = s.to_lowercase();
+    let replaced: String = lower
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let collapsed: String = replaced
+        .split('-')
+        .filter(|seg| !seg.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    // Cap length so long claim strings don't produce unreadable ids;
+    // memex-fs refs are just files so there's an FS limit too.
+    let max = 60usize;
+    if collapsed.chars().count() <= max {
+        collapsed
+    } else {
+        collapsed.chars().take(max).collect()
+    }
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        let head: String = chars.iter().take(max).collect();
+        format!("{}…", head)
+    }
+}
+
 fn build_system_prompt() -> String {
     r#"You are a personal knowledge-graph assistant. The user is looking at a node in their
 graph and is asking a question about it. You have been given:
@@ -1217,6 +1493,7 @@ pub fn run() {
             mount_status,
             compile_node_context,
             ask_stream,
+            extract_entities,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

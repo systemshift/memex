@@ -110,6 +110,15 @@ export const api = {
   ingestPath: (path: string, recursive: boolean): Promise<string[]> =>
     invoke("ingest_path", { path, recursive }),
 
+  /** Run an LLM pass over a node's text and create linked
+   *  Concept/Person/Organization/Claim nodes. Progress events:
+   *    extract-start  (payload: node_id)
+   *    extract-item   (payload: "person: Yann LeCun")
+   *    extract-done   (payload: "N entities linked")
+   *    extract-error  (payload: error message) */
+  extractEntities: (nodeId: string): Promise<void> =>
+    invoke("extract_entities", { nodeId }),
+
   /** Build the Markdown context block for a node, without sending it
    *  to the LLM. Used for the "show context" toggle so users can see
    *  exactly what the assistant was given. */

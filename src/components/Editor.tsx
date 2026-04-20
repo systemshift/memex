@@ -4,6 +4,7 @@ import { useNodeLabels } from "../hooks/useNodeLabels";
 import { typeIcon } from "../icons";
 import { RichEditor } from "./RichEditor";
 import { FileViewer } from "./FileViewer";
+import { ExtractButton } from "./ExtractButton";
 
 type Props = {
   nodeId: string;
@@ -77,6 +78,7 @@ export function Editor({ nodeId, onSaved, onGraphChanged, onContentChange }: Pro
           {typeName && <span className="node-type-pill">{typeName}</span>}
           {showIdSub && <span className="editor-id-sub">{nodeId}</span>}
         </div>
+        <ExtractButton nodeId={nodeId} onDone={onGraphChanged} />
       </header>
 
       {loadError && <p className="error" role="alert">{loadError}</p>}

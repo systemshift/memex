@@ -63,6 +63,56 @@ struct ChatRequest<'a> {
     stream: bool,
 }
 
+#[derive(Serialize)]
+struct ChatRequestJson<'a> {
+    model: &'a str,
+    messages: &'a [ChatMessage],
+    stream: bool,
+    response_format: serde_json::Value,
+}
+
+/// Non-streaming chat call that asks the model to return a single
+/// JSON object (uses OpenAI's response_format=json_object mode). Used
+/// by extraction pipelines where we want structured output, not a
+/// conversation.
+pub async fn chat_json(
+    messages: Vec<ChatMessage>,
+    model: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| "OPENAI_API_KEY is not set. Export it in the shell you launch memex from.".to_string())?;
+    let model_name = model.as_deref().unwrap_or(DEFAULT_MODEL);
+
+    let client = reqwest::Client::new();
+    let body = ChatRequestJson {
+        model: model_name,
+        messages: &messages,
+        stream: false,
+        response_format: serde_json::json!({"type": "json_object"}),
+    };
+
+    let resp = client
+        .post(OPENAI_ENDPOINT)
+        .bearer_auth(&api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("openai {}: {}", status, text));
+    }
+
+    let j: serde_json::Value = resp.json().await.map_err(|e| format!("parse: {}", e))?;
+    let content_str = j["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "openai: missing content in response".to_string())?;
+    serde_json::from_str::<serde_json::Value>(content_str)
+        .map_err(|e| format!("parse extraction JSON: {} — body was: {}", e, content_str))
+}
+
 fn parse_sse_chunk(line: &str) -> Option<String> {
     let body = line.strip_prefix("data: ")?.trim();
     if body == "[DONE]" {
