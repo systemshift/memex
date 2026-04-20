@@ -4,21 +4,29 @@ import { useNodeLabels } from "../hooks/useNodeLabels";
 import { useHover } from "../hooks/useHover";
 import { ChatPanel } from "./ChatPanel";
 import { HoverPreview } from "./HoverPreview";
-import { ArrowDownLeft, ArrowUpRight, Compass, Network, MessageSquare } from "../icons";
+import { HistoryTab } from "./HistoryTab";
+import {
+  ArrowDownLeft,
+  ArrowUpRight,
+  Compass,
+  Network,
+  MessageSquare,
+  Calendar,
+} from "../icons";
 
 type Props = {
   nodeId: string;
-  /** Bumped by the parent whenever the current node's data changes. */
   refreshKey: number;
   onSelect: (id: string) => void;
 };
 
-type Tab = "graph" | "chat";
+type Tab = "graph" | "chat" | "history";
 
 /**
- * Right column: tabbed panel. Graph tab lists backlinks, ranked
- * neighbors, and outgoing links. Chat tab is the context-aware
- * assistant. Peer rows emit hover previews after a short delay.
+ * Right column with three tabs. Graph lists this node's backlinks,
+ * ranked neighbors, and outgoing links. Chat is the context-aware
+ * assistant. History walks this node's commit log and lets the user
+ * inspect any past revision read-only.
  */
 export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
   const [tab, setTab] = useState<Tab>("graph");
@@ -42,15 +50,25 @@ export function RightPanel({ nodeId, refreshKey, onSelect }: Props) {
         >
           <MessageSquare size={13} /> Chat
         </button>
+        <button
+          role="tab"
+          aria-selected={tab === "history"}
+          className={`right-tab ${tab === "history" ? "active" : ""}`}
+          onClick={() => setTab("history")}
+        >
+          <Calendar size={13} /> History
+        </button>
       </div>
-      {tab === "graph" ? (
+      {tab === "graph" && (
         <GraphTab
           nodeId={nodeId}
           refreshKey={refreshKey}
           onSelect={onSelect}
         />
-      ) : (
-        <ChatPanel key={nodeId} nodeId={nodeId} />
+      )}
+      {tab === "chat" && <ChatPanel key={nodeId} nodeId={nodeId} />}
+      {tab === "history" && (
+        <HistoryTab nodeId={nodeId} refreshKey={refreshKey} />
       )}
     </aside>
   );

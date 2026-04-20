@@ -61,6 +61,23 @@ export const api = {
   searchNodes: (query: string): Promise<string[]> =>
     invoke("search_nodes", { query }),
 
+  /** Fetch nodes + edges for an N-hop neighborhood around `center`.
+   *  Caller renders via a force-directed layout. Capped at 200 nodes. */
+  neighborhoodGraph: (center: string, hops: number): Promise<GraphData> =>
+    invoke("neighborhood_graph", { center, hops }),
+
+  /** Enumerate emergent clusters surfaced by memex-fs. Larger first. */
+  listClusters: (): Promise<ClusterInfo[]> => invoke("list_clusters"),
+
+  /** Per-node commit history. Only commits where the node's ref
+   *  actually changed are returned — no noise. */
+  listNodeHistory: (id: string, limit: number = 64): Promise<CommitInfo[]> =>
+    invoke("list_node_history", { id, limit }),
+
+  /** Read a node's content as of a specific commit. */
+  readNodeAt: (id: string, commitCid: string): Promise<string> =>
+    invoke("read_node_at", { id, commitCid }),
+
   /** Raw bytes of a node's content. Used to render images/videos/PDFs
    *  that were ingested as binary nodes. */
   readNodeBytes: (id: string): Promise<number[]> =>
@@ -101,4 +118,34 @@ export const api = {
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
+};
+
+export type GraphNode = {
+  id: string;
+  type_name: string;
+  label: string;
+  is_center: boolean;
+};
+
+export type GraphEdge = {
+  source: string;
+  target: string;
+  link_type: string;
+};
+
+export type GraphData = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+};
+
+export type ClusterInfo = {
+  id: string;
+  members: string[];
+};
+
+export type CommitInfo = {
+  cid: string;
+  timestamp: string;
+  message: string;
+  author: string;
 };

@@ -9,6 +9,8 @@ import { EditorTabs } from "./components/EditorTabs";
 import { CommandPalette } from "./components/CommandPalette";
 import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
+import { GraphViewModal } from "./components/GraphViewModal";
+import { ClustersModal } from "./components/ClustersModal";
 import { useHistory } from "./hooks/useHistory";
 import { useTabs } from "./hooks/useTabs";
 import "./App.css";
@@ -35,6 +37,8 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
+  const [clustersOpen, setClustersOpen] = useState(false);
 
   // Word count for the status bar — the editor feeds this.
   const [currentContent, setCurrentContent] = useState("");
@@ -149,6 +153,9 @@ export default function App() {
       } else if (k === "w" && !e.shiftKey) {
         e.preventDefault();
         if (tabs.active) tabs.close(tabs.active);
+      } else if (k === "g" && !e.shiftKey) {
+        e.preventDefault();
+        setGraphOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", h);
@@ -159,13 +166,15 @@ export default function App() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (settingsOpen) setSettingsOpen(false);
+      if (clustersOpen) setClustersOpen(false);
+      else if (graphOpen) setGraphOpen(false);
+      else if (settingsOpen) setSettingsOpen(false);
       else if (searchOpen) setSearchOpen(false);
       else if (paletteOpen) setPaletteOpen(false);
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [paletteOpen, searchOpen, settingsOpen]);
+  }, [paletteOpen, searchOpen, settingsOpen, graphOpen, clustersOpen]);
 
   const wordCount = currentContent.trim()
     ? currentContent.trim().split(/\s+/).length
@@ -204,6 +213,8 @@ export default function App() {
           onSearch={() => setSearchOpen(true)}
           onSettings={() => setSettingsOpen(true)}
           onCommand={() => setPaletteOpen(true)}
+          onGraph={() => setGraphOpen(true)}
+          onClusters={() => setClustersOpen(true)}
           onBack={history.back}
           onForward={history.forward}
           canBack={history.canBack}
@@ -272,6 +283,17 @@ export default function App() {
         mountPath={mount.path}
         model={DEFAULT_MODEL}
         apiKeyPresent={apiKeyPresent}
+      />
+      <GraphViewModal
+        open={graphOpen}
+        onClose={() => setGraphOpen(false)}
+        centerId={currentId}
+        onSelect={goTo}
+      />
+      <ClustersModal
+        open={clustersOpen}
+        onClose={() => setClustersOpen(false)}
+        onSelect={goTo}
       />
     </>
   );

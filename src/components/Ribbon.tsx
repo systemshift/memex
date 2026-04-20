@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   MessageSquare,
+  Sparkles,
 } from "../icons";
 
 type Props = {
@@ -15,6 +16,8 @@ type Props = {
   onSearch: () => void;
   onSettings: () => void;
   onCommand: () => void;
+  onGraph: () => void;
+  onClusters: () => void;
   onBack: () => void;
   onForward: () => void;
   canBack: boolean;
@@ -24,8 +27,8 @@ type Props = {
 /**
  * Left activity rail. Compact vertical column of icon buttons that
  * expose the app's global actions: navigate time-wise, create, find,
- * configure. Keyboard shortcuts stay the primary interaction — the
- * ribbon is for discovery and muscle memory.
+ * visualize, configure. Keyboard shortcuts stay the primary
+ * interaction — the ribbon is for discovery and muscle memory.
  */
 export function Ribbon({
   onToday,
@@ -33,6 +36,8 @@ export function Ribbon({
   onSearch,
   onSettings,
   onCommand,
+  onGraph,
+  onClusters,
   onBack,
   onForward,
   canBack,
@@ -82,10 +87,14 @@ export function Ribbon({
 
       <div className="ribbon-group">
         <RibbonButton
-          label="Graph view (coming soon)"
-          onClick={() => {}}
-          disabled
+          label="Graph view (⌘G)"
+          onClick={onGraph}
           icon={<Network size={18} />}
+        />
+        <RibbonButton
+          label="Emergent clusters"
+          onClick={onClusters}
+          icon={<Sparkles size={18} />}
         />
         <RibbonButton
           label="Settings"

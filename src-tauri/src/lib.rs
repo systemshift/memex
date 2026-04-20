@@ -8,7 +8,7 @@ mod llm;
 mod mount;
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
@@ -284,6 +284,130 @@ fn search_nodes(query: String) -> Result<Vec<String>, String> {
         .collect())
 }
 
+#[derive(Serialize)]
+struct GraphNode {
+    id: String,
+    type_name: String,
+    label: String,
+    is_center: bool,
+}
+
+#[derive(Serialize)]
+struct GraphEdge {
+    source: String,
+    target: String,
+    link_type: String,
+}
+
+#[derive(Serialize)]
+struct GraphData {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+}
+
+/// Walk the graph outward from `center` to up to `hops` steps and
+/// return a node/edge set suitable for a force-directed layout.
+/// BFS expands through both outgoing and incoming links so the
+/// returned neighborhood is the *connected component* visible from
+/// the center (within the hop budget), not just a downstream tree.
+///
+/// Node budget defaults to 200 — a force graph above that becomes
+/// a hairball anyway, and we'd rather cap than render forever.
+#[tauri::command]
+fn neighborhood_graph(center: String, hops: u32) -> Result<GraphData, String> {
+    validate_node_id(&center)?;
+    let mount = require_mount()?;
+
+    const NODE_BUDGET: usize = 200;
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+    queue.push_back((center.clone(), 0));
+    visited.insert(center.clone());
+
+    // Dedup edges by (source, target, link_type) so a link that shows
+    // up in both endpoints' dirs isn't rendered twice.
+    let mut edge_set: HashSet<(String, String, String)> = HashSet::new();
+    let mut edges: Vec<GraphEdge> = Vec::new();
+
+    while let Some((id, depth)) = queue.pop_front() {
+        if visited.len() >= NODE_BUDGET {
+            break;
+        }
+        // Outgoing links — these are the authoritative edge records.
+        for (link_type, peer) in list_link_entries(&mount, &id, "links") {
+            let target = strip_block(&peer);
+            let key = (id.clone(), target.clone(), link_type.clone());
+            if edge_set.insert(key) {
+                edges.push(GraphEdge {
+                    source: id.clone(),
+                    target: target.clone(),
+                    link_type: link_type.clone(),
+                });
+            }
+            if depth < hops && !visited.contains(&target) && visited.len() < NODE_BUDGET {
+                visited.insert(target.clone());
+                queue.push_back((target, depth + 1));
+            }
+        }
+        // Backlinks — we only use these to discover neighbors (the
+        // edge was already recorded on the source side above, or it
+        // will be when we visit the source).
+        for (_, peer) in list_link_entries(&mount, &id, "backlinks") {
+            let source = strip_block(&peer);
+            if depth < hops && !visited.contains(&source) && visited.len() < NODE_BUDGET {
+                visited.insert(source.clone());
+                queue.push_back((source, depth + 1));
+            }
+        }
+    }
+
+    // After BFS, any edge whose endpoints we didn't visit (because of
+    // the node budget) should be dropped so the frontend doesn't get
+    // dangling refs.
+    edges.retain(|e| visited.contains(&e.source) && visited.contains(&e.target));
+
+    let nodes: Vec<GraphNode> = visited
+        .iter()
+        .map(|id| {
+            let type_name = fs::read_to_string(node_dir(&mount, id).join("type"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            GraphNode {
+                id: id.clone(),
+                type_name,
+                label: derive_label(&mount, id),
+                is_center: id == &center,
+            }
+        })
+        .collect();
+
+    Ok(GraphData { nodes, edges })
+}
+
+fn list_link_entries(mount: &Path, node_id: &str, sub: &str) -> Vec<(String, String)> {
+    let dir = node_dir(mount, node_id).join(sub);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(idx) = name.find(':') {
+            out.push((name[..idx].to_string(), name[idx + 1..].to_string()));
+        }
+    }
+    out
+}
+
+fn strip_block(peer: &str) -> String {
+    match peer.find('#') {
+        Some(i) => peer[..i].to_string(),
+        None => peer.to_string(),
+    }
+}
+
 #[tauri::command]
 fn read_neighbors(id: String) -> Result<Vec<String>, String> {
     validate_node_id(&id)?;
@@ -322,6 +446,160 @@ fn read_node_labels(ids: Vec<String>) -> Result<HashMap<String, String>, String>
 // ---------------------------------------------------------------
 // Mount status
 // ---------------------------------------------------------------
+
+// ---------------------------------------------------------------
+// Emergent clusters
+// ---------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ClusterInfo {
+    id: String,
+    members: Vec<String>,
+}
+
+/// Read every cluster memex-fs has surfaced at /emergent/clusters/.
+/// Returns them ordered by size, largest first. A cluster is a
+/// directory whose entries are symlinks to member node directories.
+#[tauri::command]
+fn list_clusters() -> Result<Vec<ClusterInfo>, String> {
+    let mount = require_mount()?;
+    let dir = mount.join("emergent").join("clusters");
+    let entries = match fs::read_dir(&dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read {}: {}", dir.display(), e)),
+    };
+    let mut out: Vec<ClusterInfo> = Vec::new();
+    for entry in entries.flatten() {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let members_path = entry.path();
+        let mut members: Vec<String> = Vec::new();
+        if let Ok(mem_entries) = fs::read_dir(&members_path) {
+            for m in mem_entries.flatten() {
+                members.push(m.file_name().to_string_lossy().into_owned());
+            }
+        }
+        members.sort();
+        out.push(ClusterInfo { id, members });
+    }
+    out.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
+    Ok(out)
+}
+
+// ---------------------------------------------------------------
+// Commit history / time-travel
+// ---------------------------------------------------------------
+
+#[derive(Serialize)]
+struct CommitInfo {
+    cid: String,
+    timestamp: String,
+    message: String,
+    author: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CommitJson {
+    #[serde(default)]
+    parent: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    timestamp: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    refs: HashMap<String, String>,
+}
+
+/// Walk the commit log newer-first and return the commits where the
+/// given node's ref changed (including creation and deletion). This
+/// is the per-node history surface the right-panel's History tab
+/// renders. Limit caps how many log entries we scan; memex-fs
+/// currently caps its FUSE log view at 64.
+#[tauri::command]
+fn list_node_history(id: String, limit: u32) -> Result<Vec<CommitInfo>, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    let log_dir = mount.join("log");
+
+    let head_cid = match fs::read_to_string(log_dir.join("HEAD")) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return Ok(Vec::new()),
+    };
+    if head_cid.is_empty() || head_cid == "(none)" {
+        return Ok(Vec::new());
+    }
+
+    let mut commits: Vec<CommitJson> = Vec::new();
+    let cap = limit.min(64) as usize;
+    for i in 0..cap {
+        let path = log_dir.join(format!("{}", i));
+        let raw = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        match serde_json::from_str::<CommitJson>(&raw) {
+            Ok(c) => commits.push(c),
+            Err(_) => break,
+        }
+    }
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Derive each commit's own CID by chaining parents from HEAD.
+    let mut cids: Vec<String> = Vec::with_capacity(commits.len());
+    cids.push(head_cid);
+    for c in &commits[..commits.len().saturating_sub(1)] {
+        cids.push(c.parent.clone());
+    }
+
+    // Filter to commits where this node's ref changed vs the parent.
+    let mut out: Vec<CommitInfo> = Vec::new();
+    for i in 0..commits.len() {
+        let this_ref = commits[i].refs.get(&id);
+        let parent_ref = commits.get(i + 1).and_then(|p| p.refs.get(&id));
+        let changed = match (this_ref, parent_ref) {
+            (Some(a), Some(b)) => a != b,
+            (Some(_), None) => true,  // created in this commit (as far as our window sees)
+            (None, Some(_)) => true,  // deleted in this commit
+            (None, None) => false,
+        };
+        if changed {
+            out.push(CommitInfo {
+                cid: cids[i].clone(),
+                timestamp: commits[i].timestamp.clone(),
+                message: commits[i].message.clone(),
+                author: commits[i].author.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Read a node's content as it existed at a specific commit. Delegates
+/// to memex-fs's existing /at/{cid}/nodes/{id}/content view so we don't
+/// reimplement snapshot logic in the GUI.
+#[tauri::command]
+fn read_node_at(id: String, commit_cid: String) -> Result<String, String> {
+    validate_node_id(&id)?;
+    if commit_cid.contains('/') || commit_cid.contains("..") || commit_cid.is_empty() {
+        return Err(format!("invalid commit cid: {}", commit_cid));
+    }
+    let mount = require_mount()?;
+    let path = mount
+        .join("at")
+        .join(&commit_cid)
+        .join("nodes")
+        .join(&id)
+        .join("content");
+    match fs::read_to_string(&path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read {}: {}", path.display(), e)),
+    }
+}
 
 #[derive(Serialize)]
 struct MountStatus {
@@ -467,6 +745,10 @@ pub fn run() {
             read_outgoing_links,
             read_backlinks,
             read_neighbors,
+            neighborhood_graph,
+            list_clusters,
+            list_node_history,
+            read_node_at,
             search_nodes,
             mount_status,
             compile_node_context,
