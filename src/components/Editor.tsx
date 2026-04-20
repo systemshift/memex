@@ -6,12 +6,18 @@ import { RichEditor } from "./RichEditor";
 
 type Props = {
   nodeId: string;
-  /** Called after a successful save so the parent can refresh side panels. */
+  /** Fires after every successful save. Cheap — just the status-bar
+   *  indicator path. */
   onSaved?: () => void;
+  /** Fires only when the save introduced or removed `[[refs]]`, i.e.
+   *  when backlinks / neighbors elsewhere in the app may have moved.
+   *  The expensive app-wide refetch hangs off this, not onSaved. */
+  onGraphChanged?: () => void;
   /** Reports content length to the status bar for word count. */
   onContentChange?: (content: string) => void;
-  /** Threaded to the editor so the `[[` picker refreshes when the
-   *  graph changes (new nodes, renames, etc.). */
+  /** No longer forwarded to the editor — its autocomplete uses a
+   *  TTL-based lazy refresh instead. Kept in the type for callers
+   *  that pass it. */
   refreshKey?: number;
 };
 
@@ -22,7 +28,7 @@ type SaveState = "idle" | "saving" | "saved" | "error";
  * content rendered by the BlockNote-backed RichEditor. Storage stays
  * markdown so Claude Code and bash stay first-class consumers.
  */
-export function Editor({ nodeId, onSaved, onContentChange, refreshKey }: Props) {
+export function Editor({ nodeId, onSaved, onGraphChanged, onContentChange }: Props) {
   const [typeName, setTypeName] = useState<string>("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [labelBump, setLabelBump] = useState(0);
@@ -48,6 +54,8 @@ export function Editor({ nodeId, onSaved, onContentChange, refreshKey }: Props) 
   }, [nodeId]);
 
   const handleSaved = () => {
+    // Re-derive this node's label after a save in case the first
+    // line changed. Cheap and local.
     setLabelBump((b) => b + 1);
     onSaved?.();
   };
@@ -70,8 +78,8 @@ export function Editor({ nodeId, onSaved, onContentChange, refreshKey }: Props) 
       <RichEditor
         nodeId={nodeId}
         onSaved={handleSaved}
+        onGraphChanged={onGraphChanged}
         onContentChange={onContentChange}
-        refreshKey={refreshKey}
       />
     </section>
   );

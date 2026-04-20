@@ -249,10 +249,9 @@ export default function App() {
             />
             <EditorWithSave
               nodeId={currentId}
-              onSaved={bump}
+              onGraphChanged={bump}
               onContentChange={setCurrentContent}
               onSaveState={setSaveState}
-              refreshKey={refreshKey}
             />
           </div>
 
@@ -319,20 +318,23 @@ export default function App() {
  *  external so Editor stays focused on content editing. */
 function EditorWithSave(props: {
   nodeId: string;
-  onSaved?: () => void;
+  /** Called only when the save changed the node's [[refs]] — i.e.
+   *  when it's worth refreshing backlinks/neighbors/history. */
+  onGraphChanged?: () => void;
   onContentChange?: (c: string) => void;
   onSaveState: (s: SaveState) => void;
-  refreshKey?: number;
 }) {
   return (
     <Editor
       nodeId={props.nodeId}
-      refreshKey={props.refreshKey}
       onSaved={() => {
+        // Cheap path: status-bar indicator only. Every save does this.
         props.onSaveState("saved");
-        // Reset to idle after a moment so the status bar doesn't look frozen.
         window.setTimeout(() => props.onSaveState("idle"), 1200);
-        props.onSaved?.();
+      }}
+      onGraphChanged={() => {
+        // Structural path: refresh panels that depend on the graph.
+        props.onGraphChanged?.();
       }}
       onContentChange={(c) => {
         props.onSaveState("saving");

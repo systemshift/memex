@@ -13,41 +13,68 @@ import { useNodeLabels } from "../hooks/useNodeLabels";
 
 type Props = {
   nodeId: string;
+  /** Fired after every successful save — status-bar indicator only. */
   onSaved?: () => void;
+  /** Fired only when the save's [[refs]] set differs from the prior
+   *  save's. This gates the expensive panel refetch cascade. */
+  onGraphChanged?: () => void;
   onContentChange?: (text: string) => void;
-  /** Bumped by the parent when the graph changes so the `[[` picker
-   *  sees newly-created nodes. Doesn't trigger editor re-creation. */
-  refreshKey?: number;
 };
 
 type RefItem = DefaultReactSuggestionItem & { id: string };
 
+/** Pattern used to extract [[type:id]] / [[type:id#bN]] refs from the
+ *  saved markdown so we can detect structural changes without parsing. */
+const REF_RE = /\[\[([\w]+:[a-f0-9]{8,64}(?:#b\d+)?)\]\]/g;
+function refsFingerprint(md: string): string {
+  const set = new Set<string>();
+  for (const m of md.matchAll(REF_RE)) set.add(m[1]);
+  return [...set].sort().join("|");
+}
+
+/** TTL for the `[[` picker's node list. Refetches lazily inside
+ *  getRefItems when the list is older than this; no refetching on
+ *  every save. */
+const AUTOCOMPLETE_TTL_MS = 5000;
+
 /**
- * BlockNote-backed editor. Storage is markdown; the editor
- * serializes to/from markdown on every autosave. Storage stays
- * readable by Claude Code / bash / any other tool talking to
- * memex-fs.
- *
- * Perf note: one editor instance per component mount. Node switches
- * call `replaceBlocks` instead of re-creating the editor, so moving
- * between tabs doesn't tear down ProseMirror every time. This is a
- * meaningful speedup over remount-on-key.
+ * BlockNote-backed editor. Storage is markdown. Autosaves on a 800 ms
+ * debounce and on blur. Only bumps the app-wide refresh counter when
+ * the save's `[[ref]]` set actually changed, so pure-text edits don't
+ * trigger the whole app to refetch its panels.
  */
-export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }: Props) {
-  // The nodeId whose content is currently in the editor. Diverges
-  // from `nodeId` prop briefly during node-switch while we flush +
-  // reload; consulted by change handlers so writes don't cross
-  // between nodes.
+export function RichEditor({
+  nodeId,
+  onSaved,
+  onGraphChanged,
+  onContentChange,
+}: Props) {
   const loadedForId = useRef<string>("");
   const saveTimer = useRef<number | null>(null);
-  // Latest nodeId in a ref so async callbacks see the current one
-  // even when they were captured mid-transition.
   const currentNodeId = useRef<string>(nodeId);
   currentNodeId.current = nodeId;
 
-  const [everyId, setEveryId] = useState<string[]>([]);
+  // Callbacks held in refs so the BlockNoteView handlers don't need
+  // unstable deps in their useCallback memo. React parents tend not
+  // to memoize onSaved / onContentChange, and we don't want every
+  // parent render to propagate a new handler identity down into
+  // ProseMirror land.
+  const savedRef = useRef(onSaved);
+  savedRef.current = onSaved;
+  const graphChangedRef = useRef(onGraphChanged);
+  graphChangedRef.current = onGraphChanged;
+  const contentChangeRef = useRef(onContentChange);
+  contentChangeRef.current = onContentChange;
 
-  // --- Editor creation (runs once per mount) -----------------------------
+  // Last saved refs per-node — lets us detect "content changed but
+  // [[refs]] didn't" and skip bumping the app refresh counter.
+  const lastRefsByNode = useRef<Map<string, string>>(new Map());
+
+  const [everyId, setEveryId] = useState<string[]>([]);
+  const lastAutocompleteFetchAt = useRef<number>(0);
+  const autocompleteInFlight = useRef<Promise<void> | null>(null);
+
+  // --- Editor creation (once per mount) ----------------------------------
 
   const editor = useCreateBlockNote({
     initialContent: [{ type: "paragraph", content: "" }],
@@ -80,15 +107,12 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
     },
   });
 
-  // --- Autocomplete source -----------------------------------------------
-  //
-  // Refresh when the graph is known to have changed (refreshKey bump),
-  // not on every nodeId switch. Previously this fetch ran on every
-  // tab change, which burned IPC and caused a visible stutter.
+  // --- Autocomplete source (mount + lazy TTL refresh) --------------------
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
+  const fetchEveryId = useCallback(async () => {
+    // Coalesce concurrent calls.
+    if (autocompleteInFlight.current) return autocompleteInFlight.current;
+    const p = (async () => {
       try {
         const types = await api.listTypes();
         const ids: string[] = [];
@@ -96,19 +120,27 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
           const rows = await api.listNodesByType(t.name);
           ids.push(...rows);
         }
-        if (!cancelled) setEveryId(ids);
+        setEveryId(ids);
+        lastAutocompleteFetchAt.current = Date.now();
       } catch {
-        // Not fatal — autocomplete just shows no results.
+        // Not fatal — picker just shows stale / no results.
+      } finally {
+        autocompleteInFlight.current = null;
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey]);
+    autocompleteInFlight.current = p;
+    return p;
+  }, []);
 
-  const labels = useNodeLabels(everyId, refreshKey);
+  // Initial fetch on mount. Subsequent fetches are triggered lazily
+  // from getRefItems when the user actually opens the `[[` picker.
+  useEffect(() => {
+    fetchEveryId();
+  }, [fetchEveryId]);
 
-  // --- Node switch: flush pending save, then replace content -------------
+  const labels = useNodeLabels(everyId, 0);
+
+  // --- Node switch: flush outgoing save, then replace content ------------
 
   useEffect(() => {
     let cancelled = false;
@@ -116,8 +148,6 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
     const outgoing = loadedForId.current;
 
     (async () => {
-      // 1. Flush the previous node's pending save synchronously so
-      // content from the old node never lands on the new one.
       if (saveTimer.current !== null) {
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;
@@ -125,15 +155,11 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
           try {
             const md = await editor.blocksToMarkdownLossy(editor.document);
             await api.writeNode(outgoing, md);
-          } catch {
-            // Save errors bubble through the parent's status; not critical here.
-          }
+          } catch {}
         }
       }
 
       if (cancelled) return;
-
-      // 2. Disable writes while we swap in the new content.
       loadedForId.current = "";
 
       try {
@@ -145,39 +171,52 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
         if (cancelled) return;
         editor.replaceBlocks(editor.document, blocks as any);
         loadedForId.current = incoming;
-        onContentChange?.(md);
-      } catch {
-        // Leave whatever's in the editor; the wrapper renders a
-        // load-error banner from its own state.
-      }
+        lastRefsByNode.current.set(incoming, refsFingerprint(md));
+        contentChangeRef.current?.(md);
+      } catch {}
     })();
 
     return () => {
       cancelled = true;
     };
-    // We deliberately don't depend on editor — it's stable for the
-    // lifetime of this component.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId]);
 
   // --- Save plumbing -----------------------------------------------------
+  //
+  // Handlers are stable (empty deps) because everything they read is
+  // behind a ref. BlockNoteView therefore doesn't see a new handler
+  // identity on every parent render.
+
+  const commitSave = useCallback(async (target: string) => {
+    try {
+      const md = await editor.blocksToMarkdownLossy(editor.document);
+      await api.writeNode(target, md);
+      contentChangeRef.current?.(md);
+      savedRef.current?.();
+      // Only bump the app refresh counter when [[refs]] changed.
+      const now = refsFingerprint(md);
+      const prev = lastRefsByNode.current.get(target);
+      if (prev !== undefined && prev !== now) {
+        graphChangedRef.current?.();
+      }
+      lastRefsByNode.current.set(target, now);
+    } catch {
+      // Save errors surface through the status bar via the save-state
+      // wrapper; nothing actionable here.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleChange = useCallback(() => {
-    // Ignore events while content is being swapped in.
     if (loadedForId.current !== currentNodeId.current) return;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     const target = currentNodeId.current;
-    saveTimer.current = window.setTimeout(async () => {
+    saveTimer.current = window.setTimeout(() => {
       saveTimer.current = null;
-      try {
-        const md = await editor.blocksToMarkdownLossy(editor.document);
-        await api.writeNode(target, md);
-        onContentChange?.(md);
-        onSaved?.();
-      } catch {}
+      commitSave(target);
     }, 800);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, onContentChange, onSaved]);
+  }, [commitSave]);
 
   const handleBlur = useCallback(async () => {
     if (loadedForId.current !== currentNodeId.current) return;
@@ -185,15 +224,8 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    const target = currentNodeId.current;
-    try {
-      const md = await editor.blocksToMarkdownLossy(editor.document);
-      await api.writeNode(target, md);
-      onContentChange?.(md);
-      onSaved?.();
-    } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, onContentChange, onSaved]);
+    await commitSave(currentNodeId.current);
+  }, [commitSave]);
 
   // --- [[ref]] picker ----------------------------------------------------
 
@@ -218,7 +250,13 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
   );
 
   const getRefItems = useCallback(
-    (query: string): RefItem[] => {
+    async (query: string): Promise<RefItem[]> => {
+      // Lazy TTL refresh — refetch when the list is stale and the
+      // user is actively using the picker. Fires off-thread so the
+      // first keystroke renders immediately with the cached list.
+      if (Date.now() - lastAutocompleteFetchAt.current > AUTOCOMPLETE_TTL_MS) {
+        fetchEveryId();
+      }
       const q = (query ?? "").toLowerCase();
       const normalized = q.startsWith("[") ? q.slice(1).trim() : q.trim();
       const scored = everyId
@@ -248,7 +286,7 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
         };
       });
     },
-    [everyId, labels, insertRef],
+    [everyId, labels, insertRef, fetchEveryId],
   );
 
   const themeOverride = useMemo(() => getPreferredTheme(), []);
@@ -263,7 +301,7 @@ export function RichEditor({ nodeId, onSaved, onContentChange, refreshKey = 0 }:
       >
         <SuggestionMenuController
           triggerCharacter="["
-          getItems={async (query) => getRefItems(query)}
+          getItems={getRefItems}
         />
       </BlockNoteView>
     </div>
