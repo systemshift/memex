@@ -88,6 +88,11 @@ export const api = {
   readNodeMime: (id: string): Promise<string> =>
     invoke("read_node_mime", { id }),
 
+  /** Read the whole meta.json for a node. Returns {} if there is
+   *  no meta file yet. */
+  readNodeMeta: (id: string): Promise<Record<string, unknown>> =>
+    invoke("read_node_meta_json", { id }),
+
   /** Ingest arbitrary bytes as a new node. Returns the newly-created
    *  id (e.g. `img:9f8a2b...`) so the caller can embed it as
    *  `memex://{id}` in document content. */

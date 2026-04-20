@@ -1266,6 +1266,119 @@ code {
 
 /* ---------- Hover preview ---------- */
 
+/* ---------- File viewer ---------- */
+
+.file-viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.file-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.file-icon {
+  color: var(--accent);
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.file-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.file-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-sub {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.file-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-subtle);
+  background: transparent;
+  border: none;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60ch;
+}
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12.5px;
+  transition: background 100ms, border-color 100ms;
+  flex-shrink: 0;
+}
+.btn-secondary:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.file-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 28px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.file-section-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+.file-extracted {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--fg);
+}
+.file-extracted p {
+  margin: 0 0 10px;
+}
+.file-extracted code {
+  font-size: 12.5px;
+}
+.file-extracted pre {
+  background: var(--bg-elev);
+  padding: 10px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  font-size: 12.5px;
+}
+.file-empty {
+  padding: 12px;
+  line-height: 1.5;
+}
+
 /* ---------- Import modal ---------- */
 
 .import-modal {

@@ -91,6 +91,21 @@ fn read_node_mime(id: String) -> Result<String, String> {
     Ok(read_mime(&mount, &id).unwrap_or_default())
 }
 
+/// Return the whole meta.json as a JSON object. Used by the file
+/// viewer to render basename / MIME / size / extracted_text without
+/// making four round-trips.
+#[tauri::command]
+fn read_node_meta_json(id: String) -> Result<serde_json::Value, String> {
+    validate_node_id(&id)?;
+    let mount = require_mount()?;
+    let path = node_dir(&mount, &id).join("meta.json");
+    match fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("parse meta: {}", e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(e) => Err(format!("read {}: {}", path.display(), e)),
+    }
+}
+
 /// Ingest arbitrary bytes as a new node. Hashes the content with
 /// SHA-256, picks an id-prefix from the MIME (img / video / audio /
 /// pdf / file), writes content + meta.json with the MIME and optional
@@ -301,6 +316,16 @@ fn ingest_single_file(mount: &Path, path: &Path) -> Result<String, String> {
         );
     }
 
+    // For binary formats where we have a reliable text extractor, pull
+    // the plaintext out so the node becomes readable, searchable, and
+    // chat-queryable. Only the common case (PDF) for now.
+    if let Some(text) = try_extract_text(path, &mime) {
+        desired_meta.insert(
+            "extracted_text".into(),
+            serde_json::Value::String(text),
+        );
+    }
+
     let meta_path = dir.join("meta.json");
     let merged: serde_json::Map<String, serde_json::Value> = if meta_path.exists() {
         let mut prev: serde_json::Map<String, serde_json::Value> =
@@ -373,6 +398,48 @@ fn mime_from_extension(path: &Path) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+/// Opportunistic text extraction for binary formats. Shells out to
+/// well-known CLI tools — no new Rust dependencies. If the tool
+/// isn't installed, or extraction fails, returns None and the node
+/// is still usable (just without preview text).
+///
+/// Output is capped at ~50 000 chars so meta.json doesn't grow
+/// unboundedly for a 500-page book.
+fn try_extract_text(path: &Path, mime: &str) -> Option<String> {
+    let max_chars = 50_000;
+    match mime {
+        "application/pdf" => run_pdftotext(path, max_chars),
+        _ => None,
+    }
+}
+
+fn run_pdftotext(path: &Path, max_chars: usize) -> Option<String> {
+    use std::process::Command;
+    let output = Command::new("pdftotext")
+        .arg("-enc")
+        .arg("UTF-8")
+        .arg("-nopgbrk")
+        .arg(path)
+        .arg("-") // write to stdout
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= max_chars {
+        Some(chars.into_iter().collect())
+    } else {
+        let head: String = chars.iter().take(max_chars).collect();
+        Some(format!("{}\n\n…[truncated]", head))
+    }
 }
 
 fn source_mtime_secs(path: &Path) -> Option<i64> {
@@ -1133,6 +1200,7 @@ pub fn run() {
             read_node_type,
             read_node_bytes,
             read_node_mime,
+            read_node_meta_json,
             create_binary_node,
             read_node_labels,
             ingest_path,

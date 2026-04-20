@@ -3,33 +3,31 @@ import { api } from "../api";
 import { useNodeLabels } from "../hooks/useNodeLabels";
 import { typeIcon } from "../icons";
 import { RichEditor } from "./RichEditor";
+import { FileViewer } from "./FileViewer";
 
 type Props = {
   nodeId: string;
-  /** Fires after every successful save. Cheap — just the status-bar
-   *  indicator path. */
+  /** Fires after every successful save. Cheap path — status bar only. */
   onSaved?: () => void;
-  /** Fires only when the save introduced or removed `[[refs]]`, i.e.
-   *  when backlinks / neighbors elsewhere in the app may have moved.
-   *  The expensive app-wide refetch hangs off this, not onSaved. */
+  /** Fires when the save's [[refs]] set actually changed. */
   onGraphChanged?: () => void;
   /** Reports content length to the status bar for word count. */
   onContentChange?: (content: string) => void;
-  /** No longer forwarded to the editor — its autocomplete uses a
-   *  TTL-based lazy refresh instead. Kept in the type for callers
-   *  that pass it. */
+  /** Accepted for API symmetry; not forwarded. */
   refreshKey?: number;
 };
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 /**
- * Center column. Shows the current node's label + type, and its
- * content rendered by the BlockNote-backed RichEditor. Storage stays
- * markdown so Claude Code and bash stay first-class consumers.
+ * Center column. Dispatches to RichEditor for text-ish nodes and to
+ * FileViewer for binary nodes (PDFs / images / videos / audio / generic
+ * files). We can't ask BlockNote to render PDF bytes as text — trying
+ * would give the user garbage.
  */
 export function Editor({ nodeId, onSaved, onGraphChanged, onContentChange }: Props) {
   const [typeName, setTypeName] = useState<string>("");
+  const [mime, setMime] = useState<string>("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [labelBump, setLabelBump] = useState(0);
   const labels = useNodeLabels([nodeId], labelBump);
@@ -41,9 +39,13 @@ export function Editor({ nodeId, onSaved, onGraphChanged, onContentChange }: Pro
     (async () => {
       setLoadError(null);
       try {
-        const t = await api.readNodeType(nodeId);
+        const [t, m] = await Promise.all([
+          api.readNodeType(nodeId),
+          api.readNodeMime(nodeId),
+        ]);
         if (cancelled) return;
         setTypeName(t);
+        setMime(m);
       } catch (e) {
         if (!cancelled) setLoadError(String(e));
       }
@@ -54,13 +56,17 @@ export function Editor({ nodeId, onSaved, onGraphChanged, onContentChange }: Pro
   }, [nodeId]);
 
   const handleSaved = () => {
-    // Re-derive this node's label after a save in case the first
-    // line changed. Cheap and local.
     setLabelBump((b) => b + 1);
     onSaved?.();
   };
 
   const Icon = typeIcon(typeName);
+
+  // Binary nodes render a FileViewer; text nodes (empty MIME counts as
+  // text — that's the common case for user-created notes) render the
+  // rich editor.
+  const isBinary =
+    mime && !mime.startsWith("text/") && !["application/json", "application/yaml", "application/xml"].includes(mime);
 
   return (
     <section className="editor-pane">
@@ -75,12 +81,16 @@ export function Editor({ nodeId, onSaved, onGraphChanged, onContentChange }: Pro
 
       {loadError && <p className="error" role="alert">{loadError}</p>}
 
-      <RichEditor
-        nodeId={nodeId}
-        onSaved={handleSaved}
-        onGraphChanged={onGraphChanged}
-        onContentChange={onContentChange}
-      />
+      {isBinary ? (
+        <FileViewer nodeId={nodeId} />
+      ) : (
+        <RichEditor
+          nodeId={nodeId}
+          onSaved={handleSaved}
+          onGraphChanged={onGraphChanged}
+          onContentChange={onContentChange}
+        />
+      )}
     </section>
   );
 }

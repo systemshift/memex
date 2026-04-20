@@ -48,11 +48,27 @@ pub fn compile(mount: &Path, node_id: &str) -> String {
         }
     }
 
-    if let Ok(content) = fs::read_to_string(node_dir(mount, node_id).join("content")) {
-        if !content.trim().is_empty() {
-            out.push_str("## Content\n");
-            out.push_str(content.trim());
-            out.push_str("\n\n");
+    // For text nodes the content IS the text; for binary nodes we
+    // prefer meta.extracted_text so the LLM sees something readable
+    // instead of raw PDF bytes.
+    let mut included_content = false;
+    if let Some(meta) = read_meta(mount, node_id) {
+        if let Some(extracted) = meta.get("extracted_text").and_then(|v| v.as_str()) {
+            if !extracted.trim().is_empty() {
+                out.push_str("## Content (extracted from source)\n");
+                out.push_str(extracted.trim());
+                out.push_str("\n\n");
+                included_content = true;
+            }
+        }
+    }
+    if !included_content {
+        if let Ok(content) = fs::read_to_string(node_dir(mount, node_id).join("content")) {
+            if !content.trim().is_empty() {
+                out.push_str("## Content\n");
+                out.push_str(content.trim());
+                out.push_str("\n\n");
+            }
         }
     }
 

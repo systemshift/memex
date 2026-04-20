@@ -64,7 +64,8 @@ pub fn is_binary_node(mount: &Path, id: &str) -> bool {
 }
 
 pub fn derive_label(mount: &Path, id: &str) -> String {
-    if let Some(meta) = read_meta(mount, id) {
+    let meta = read_meta(mount, id);
+    if let Some(meta) = &meta {
         for key in ["title", "name", "label", "alt"] {
             if let Some(v) = meta.get(key).and_then(Value::as_str) {
                 let trimmed = v.trim();
@@ -74,16 +75,39 @@ pub fn derive_label(mount: &Path, id: &str) -> String {
             }
         }
     }
-    // Binary nodes don't have readable "first line" content — skip the
-    // content scan and fall through to the humanized id, which for
-    // image / video / file ids is readable on its own (e.g. `img:a0b1…`).
-    if !is_binary_node(mount, id) {
-        if let Ok(content) = fs::read_to_string(node_dir(mount, id).join("content")) {
-            for raw_line in content.lines() {
-                let stripped = raw_line.trim().trim_start_matches('#').trim();
-                if !stripped.is_empty() {
-                    return truncate_label(stripped, 60);
+    let binary = is_binary_node(mount, id);
+    // Binary nodes: skip the content scan (bytes), prefer basename,
+    // then a first line of extracted text if we ran an extractor.
+    if binary {
+        if let Some(meta) = &meta {
+            if let Some(v) = meta.get("basename").and_then(Value::as_str) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    // Drop the extension so labels read more naturally
+                    // ("attention-is-all-you-need" rather than
+                    // "attention-is-all-you-need.pdf").
+                    let stem = std::path::Path::new(trimmed)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| trimmed.to_string());
+                    return stem;
                 }
+            }
+            if let Some(ex) = meta.get("extracted_text").and_then(Value::as_str) {
+                for raw_line in ex.lines().take(5) {
+                    let stripped = raw_line.trim().trim_start_matches('#').trim();
+                    if !stripped.is_empty() {
+                        return truncate_label(stripped, 60);
+                    }
+                }
+            }
+        }
+    } else if let Ok(content) = fs::read_to_string(node_dir(mount, id).join("content")) {
+        for raw_line in content.lines() {
+            let stripped = raw_line.trim().trim_start_matches('#').trim();
+            if !stripped.is_empty() {
+                return truncate_label(stripped, 60);
             }
         }
     }
